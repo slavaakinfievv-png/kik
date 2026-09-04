@@ -18,6 +18,36 @@ from app.runtime import router
 from app.states import ApplicationForm, _is_application_state, _state_matches
 from app.ui import _validate_form_session, admin_keyboard, build_application_text, build_staff_card, edit_fields_keyboard, get_question_config, show_confirmation, show_step, text_question_keyboard, user_dashboard_keyboard
 
+
+def _is_form_input_message(message: Message) -> bool:
+    """Не даёт общему FSM-обработчику перехватывать команды Telegram."""
+    text = message.text or ""
+    return not text.startswith("/")
+
+
+def _choice_option(question: dict, raw_value: str) -> str | None:
+    """Безопасно разрешает индекс кнопки без Python negative-index semantics."""
+    options = question.get("options") or []
+    try:
+        index = int(raw_value)
+    except (TypeError, ValueError):
+        return None
+    if index < 0 or index >= len(options):
+        return None
+    return str(options[index])
+
+
+async def _link_staff_message(application_id: int, message_id: int) -> bool:
+    """Привязывает STAFF-сообщение только если заявка всё ещё существует."""
+    async with aiosqlite.connect(config.DB_PATH) as db:
+        cursor = await db.execute(
+            "UPDATE applications SET staff_message_id = ? WHERE id = ?",
+            (message_id, application_id),
+        )
+        await db.commit()
+        return cursor.rowcount == 1
+
+
 @router.callback_query(F.data.startswith("form:cancel:"))
 async def cancel_form(callback: CallbackQuery, state: FSMContext):
     parts = (callback.data or "").split(":", 2)
@@ -130,10 +160,8 @@ async def form_choose(callback: CallbackQuery, state: FSMContext):
             return
         value = raw_value
     else:
-        try:
-            index = int(raw_value)
-            value = question["options"][index]
-        except (ValueError, IndexError):
+        value = _choice_option(question, raw_value)
+        if value is None:
             await callback.answer("Некорректный вариант.", show_alert=True)
             return
 
@@ -208,7 +236,7 @@ async def form_custom(callback: CallbackQuery, state: FSMContext):
         )
 
 
-@router.message(ApplicationForm.filling)
+@router.message(ApplicationForm.filling, _is_form_input_message)
 async def form_text_answer(message: Message, state: FSMContext):
     if not message.text:
         await message.answer("❌ Отправь ответ текстом.")
@@ -434,18 +462,34 @@ async def submit_application(callback: CallbackQuery, state: FSMContext):
         return
 
     try:
-        async with aiosqlite.connect(config.DB_PATH) as db:
-            await db.execute(
-                "UPDATE applications SET staff_message_id = ? WHERE id = ?",
-                (staff_message.message_id, application_id),
-            )
-            await db.commit()
+        linked = await _link_staff_message(application_id, staff_message.message_id)
     except Exception as exc:
         await report_runtime_exception(
             callback.bot,
             exc,
             context=f"save_staff_message_id:{application_id}",
         )
+        linked = True
+
+    if not linked:
+        # Администратор мог удалить заявку через /clearapps ровно между INSERT
+        # и отправкой STAFF-карточки. Не подтверждаем пользователю несуществующую заявку.
+        try:
+            await callback.bot.delete_message(
+                config.ADMIN_CHAT_ID,
+                staff_message.message_id,
+            )
+        except Exception:
+            config.logger.warning(
+                "failed to remove orphan STAFF message for application #%s",
+                application_id,
+                exc_info=True,
+            )
+        await callback.answer(
+            "Заявка была удалена до завершения отправки. Нажми «Отправить» ещё раз.",
+            show_alert=True,
+        )
+        return
 
     await state.clear()
     await callback.answer("✅ Анкета отправлена!")
