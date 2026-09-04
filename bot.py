@@ -4,6 +4,7 @@ import html
 import json
 import logging
 import os
+import secrets
 import traceback
 import urllib.request
 from datetime import datetime, timezone
@@ -404,9 +405,13 @@ TEXT_STYLES = {
 }
 
 def custom_emoji_html(emoji_id, fallback):
+    safe_fallback = html.escape(str(fallback or "✨"))
     if not emoji_id:
-        return fallback
-    return f'<tg-emoji emoji-id="{html.escape(str(emoji_id), quote=True)}">{fallback}</tg-emoji>'
+        return safe_fallback
+    return (
+        f'<tg-emoji emoji-id="{html.escape(str(emoji_id), quote=True)}">'
+        f'{safe_fallback}</tg-emoji>'
+    )
 
 async def get_custom_value(key, default=None):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -509,165 +514,180 @@ def start_keyboard(status: str | None = None):
     return user_main_keyboard(status)
 
 
-def cancel_keyboard():
+def _form_callback(action: str, session_id: str, *parts: object) -> str:
+    suffix = ":".join(str(part) for part in parts)
+    return f"form:{action}:{session_id}" + (f":{suffix}" if suffix else "")
+
+
+def cancel_keyboard(session_id: str):
     return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="❌ Отмена",
-                    callback_data="form:cancel",
-                )
-            ]
-        ]
+        inline_keyboard=[[
+            InlineKeyboardButton(
+                text="❌ Отмена",
+                callback_data=_form_callback("cancel", session_id),
+            )
+        ]]
     )
 
 
-def text_question_keyboard(step: int):
+def text_question_keyboard(step: int, session_id: str):
     rows = []
     if step > 0:
         rows.append(
             InlineKeyboardButton(
                 text="⬅️ Назад",
-                callback_data="form:back",
+                callback_data=_form_callback("back", session_id),
             )
         )
     rows.append(
         InlineKeyboardButton(
             text="❌ Отмена",
-            callback_data="form:cancel",
+            callback_data=_form_callback("cancel", session_id),
         )
     )
     return InlineKeyboardMarkup(inline_keyboard=[rows])
 
 
-def choice_keyboard(step: int, options: list[str]):
+def choice_keyboard(step: int, options: list[str], session_id: str):
     rows = []
     for index, option in enumerate(options):
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text=option,
-                    callback_data=f"form:choose:{step}:{index}",
-                )
-            ]
-        )
+        rows.append([
+            InlineKeyboardButton(
+                text=option,
+                callback_data=_form_callback("choose", session_id, step, index),
+            )
+        ])
 
     nav = []
     if step > 0:
         nav.append(
             InlineKeyboardButton(
                 text="⬅️ Назад",
-                callback_data="form:back",
+                callback_data=_form_callback("back", session_id),
             )
         )
     nav.append(
         InlineKeyboardButton(
             text="❌ Отмена",
-            callback_data="form:cancel",
+            callback_data=_form_callback("cancel", session_id),
         )
     )
     rows.append(nav)
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def yes_no_keyboard(step: int):
+def yes_no_keyboard(step: int, session_id: str):
+    nav = []
+    if step > 0:
+        nav.append(
+            InlineKeyboardButton(
+                text="⬅️ Назад",
+                callback_data=_form_callback("back", session_id),
+            )
+        )
+    nav.append(
+        InlineKeyboardButton(
+            text="🚫 Отмена",
+            callback_data=_form_callback("cancel", session_id),
+        )
+    )
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
                     text="✅ Да",
-                    callback_data=f"form:choose:{step}:0",
+                    callback_data=_form_callback("choose", session_id, step, 0),
                 ),
                 InlineKeyboardButton(
                     text="❌ Нет",
-                    callback_data=f"form:choose:{step}:1",
+                    callback_data=_form_callback("choose", session_id, step, 1),
                 ),
             ],
-            [
-                InlineKeyboardButton(
-                    text="⬅️ Назад",
-                    callback_data="form:back",
-                ),
-                InlineKeyboardButton(
-                    text="🚫 Отмена",
-                    callback_data="form:cancel",
-                ),
-            ],
+            nav,
         ]
     )
 
 
-def free_text_choice_keyboard(step: int):
-    rows = [
-        [
-            InlineKeyboardButton(
-                text="✍️ Ввести свой ответ",
-                callback_data=f"form:custom:{step}",
-            )
-        ]
-    ]
+def free_text_choice_keyboard(step: int, session_id: str):
+    rows = [[
+        InlineKeyboardButton(
+            text="✍️ Ввести свой ответ",
+            callback_data=_form_callback("custom", session_id, step),
+        )
+    ]]
+    nav = []
     if step > 0:
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text="⬅️ Назад",
-                    callback_data="form:back",
-                ),
-                InlineKeyboardButton(
-                    text="❌ Отмена",
-                    callback_data="form:cancel",
-                ),
-            ]
+        nav.append(
+            InlineKeyboardButton(
+                text="⬅️ Назад",
+                callback_data=_form_callback("back", session_id),
+            )
         )
-    else:
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text="❌ Отмена",
-                    callback_data="form:cancel",
-                )
-            ]
+    nav.append(
+        InlineKeyboardButton(
+            text="❌ Отмена",
+            callback_data=_form_callback("cancel", session_id),
         )
+    )
+    rows.append(nav)
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def confirmation_keyboard():
+def confirmation_keyboard(session_id: str):
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
                     text="✅ Отправить",
-                    callback_data="form:submit",
+                    callback_data=_form_callback("submit", session_id),
                 )
             ],
             [
                 InlineKeyboardButton(
                     text="✏️ Изменить",
-                    callback_data="form:edit",
+                    callback_data=_form_callback("edit", session_id),
                 ),
                 InlineKeyboardButton(
                     text="❌ Отмена",
-                    callback_data="form:cancel",
+                    callback_data=_form_callback("cancel", session_id),
                 ),
             ],
         ]
     )
 
 
-async def edit_fields_keyboard():
+async def edit_fields_keyboard(session_id: str):
     rows = []
     for index, question in enumerate(QUESTIONS):
         cfg = await get_question_config(question)
         rows.append([
             InlineKeyboardButton(
                 text=f"{index + 1}. {cfg['title'][:50]}",
-                callback_data=f"form:edit_field:{index}",
+                callback_data=_form_callback("edit_field", session_id, index),
             )
         ])
     rows.append([
-        InlineKeyboardButton(text="⬅️ К проверке анкеты", callback_data="form:edit_back")
+        InlineKeyboardButton(
+            text="⬅️ К проверке анкеты",
+            callback_data=_form_callback("edit_back", session_id),
+        )
     ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _validate_form_session(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session_id: str,
+) -> bool:
+    data = await state.get_data()
+    if not session_id or session_id != data.get("session_id"):
+        await callback.answer(
+            "Эта кнопка относится к старой анкете. Открой текущую анкету через /start.",
+            show_alert=True,
+        )
+        return False
+    return True
 
 
 def admin_keyboard(application_id: int):
@@ -730,10 +750,23 @@ async def build_application_text(answers: dict[str, str]) -> str:
     return "\n".join(lines)
 
 
-def build_staff_card(application_id: int, answers: dict[str, str]) -> str:
+def build_staff_card(
+    application_id: int,
+    answers: dict[str, str],
+    *,
+    status: str = "pending",
+    rejection_reason: str | None = None,
+) -> str:
     """Короткая карточка заявки для STAFF без Telegram-контактов."""
-    return (
-        f"🆕 <b>НОВАЯ ЗАЯВКА #{application_id}</b>\n\n"
+    status_text = {
+        "pending": "⏳ <b>Статус:</b> ожидает решения",
+        "accepted": "✅ <b>Статус:</b> принята",
+        "rejected": "❌ <b>Статус:</b> отклонена",
+    }.get(status, f"📋 <b>Статус:</b> {html.escape(status)}")
+
+    title = "🆕 <b>НОВАЯ ЗАЯВКА" if status == "pending" else "📋 <b>ЗАЯВКА"
+    text = (
+        f"{title} #{application_id}</b>\n\n"
         f"🎮 <b>Roblox:</b> {html.escape(answers.get('roblox', '—'))}\n"
         f"📊 <b>Уровень:</b> {html.escape(answers.get('level', '—'))}\n"
         f"⏱ <b>Опыт:</b> {html.escape(answers.get('experience', '—'))}\n"
@@ -745,11 +778,22 @@ def build_staff_card(application_id: int, answers: dict[str, str]) -> str:
         "💬 <b>Причина вступления:</b>\n"
         f"{html.escape(answers.get('reason', '—'))}\n\n"
         "━━━━━━━━━━━━━━\n"
-        "⏳ <b>Статус:</b> ожидает решения"
+        f"{status_text}"
     )
+    if status == "rejected" and rejection_reason:
+        text += f"\n💬 <b>Причина отказа:</b> {html.escape(rejection_reason)}"
+    return text
 
 
 async def show_step(message: Message, state: FSMContext, step: int, edit: bool = False):
+    if step < 0 or step >= len(QUESTIONS):
+        raise ValueError(f"Некорректный шаг анкеты: {step}")
+
+    data = await state.get_data()
+    session_id = str(data.get("session_id") or "")
+    if not session_id:
+        raise RuntimeError("В FSM отсутствует session_id анкеты")
+
     question = QUESTIONS[step]
     total = len(QUESTIONS)
 
@@ -769,24 +813,25 @@ async def show_step(message: Message, state: FSMContext, step: int, edit: bool =
 
     if question["type"] == "text":
         text += "✍️ Отправь ответ одним сообщением."
-        markup = text_question_keyboard(step)
+        markup = text_question_keyboard(step, session_id)
     elif question["type"] == "level":
         text += "Выбери уровень:"
-        markup = choice_keyboard(step, question["options"])
-        markup.inline_keyboard.append(
+        markup = choice_keyboard(step, question["options"], session_id)
+        markup.inline_keyboard.insert(
+            -1,
             [InlineKeyboardButton(
                 text="✍️ Ввести свой уровень",
-                callback_data=f"form:custom:{step}",
-            )]
+                callback_data=_form_callback("custom", session_id, step),
+            )],
         )
     elif question["type"] == "choice":
         text += "Выбери один вариант или введи свой ответ:"
-        markup = choice_keyboard(step, question["options"])
+        markup = choice_keyboard(step, question["options"], session_id)
         markup.inline_keyboard.insert(
             -1,
             [InlineKeyboardButton(
                 text="✍️ Свой ответ",
-                callback_data=f"form:custom:{step}",
+                callback_data=_form_callback("custom", session_id, step),
             )],
         )
     elif question["type"] == "rating":
@@ -797,25 +842,31 @@ async def show_step(message: Message, state: FSMContext, step: int, edit: bool =
             [
                 InlineKeyboardButton(
                     text=value,
-                    callback_data=f"form:choose:{step}:{value}",
+                    callback_data=_form_callback("choose", session_id, step, value),
                 )
                 for value in row
             ]
             for row in rows
         ]
+        nav = []
         if step > 0:
-            inline.append([
-                InlineKeyboardButton(text="⬅️ Назад", callback_data="form:back"),
-                InlineKeyboardButton(text="❌ Отмена", callback_data="form:cancel"),
-            ])
-        else:
-            inline.append([
-                InlineKeyboardButton(text="❌ Отмена", callback_data="form:cancel")
-            ])
+            nav.append(
+                InlineKeyboardButton(
+                    text="⬅️ Назад",
+                    callback_data=_form_callback("back", session_id),
+                )
+            )
+        nav.append(
+            InlineKeyboardButton(
+                text="❌ Отмена",
+                callback_data=_form_callback("cancel", session_id),
+            )
+        )
+        inline.append(nav)
         markup = InlineKeyboardMarkup(inline_keyboard=inline)
     elif question["type"] == "yes_no":
         text += "Выбери ответ:"
-        markup = yes_no_keyboard(step)
+        markup = yes_no_keyboard(step, session_id)
     else:
         raise RuntimeError(f"Неизвестный тип вопроса: {question['type']}")
 
@@ -833,10 +884,18 @@ async def show_confirmation(
 ):
     data = await state.get_data()
     answers = dict(data.get("answers", {}))
+    session_id = str(data.get("session_id") or "")
+    if not session_id:
+        raise RuntimeError("В FSM отсутствует session_id анкеты")
 
     header = await get_application_header()
+    header_style = await get_custom_value("application:header_style", DEFAULT_TEXT_STYLE)
+    if header_style not in TEXT_STYLES:
+        header_style = DEFAULT_TEXT_STYLE
+    styled_header = apply_text_style(header, header_style)
+
     lines = [
-        f"🎮 <b>{html.escape(header)}</b>",
+        f"🎮 <b>{styled_header}</b>",
         "━━━━━━━━━━━━━━━━━━",
         "",
         "✅ <b>Проверь анкету перед отправкой</b>",
@@ -851,10 +910,11 @@ async def show_confirmation(
 
     lines.append("Если всё правильно — нажми «✅ Отправить».")
     text = "\n".join(lines)
+    markup = confirmation_keyboard(session_id)
     if edit:
-        await message.edit_text(text, reply_markup=confirmation_keyboard())
+        await message.edit_text(text, reply_markup=markup)
     else:
-        await message.answer(text, reply_markup=confirmation_keyboard())
+        await message.answer(text, reply_markup=markup)
 
 
 # =========================================================
@@ -936,6 +996,29 @@ async def init_db():
                 created_at TEXT NOT NULL
             )
         """)
+
+        # В ранней версии updated_at заполнялся в момент создания заявки,
+        # поэтому пользователь видел одинаковые «Подана» и «Обновлена».
+        # Для ожидающих решения заявок это не является реальным обновлением.
+        await db.execute(
+            """
+            UPDATE applications
+            SET updated_at = NULL
+            WHERE status = 'pending'
+              AND decided_at IS NULL
+              AND updated_at = created_at
+            """
+        )
+
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_applications_user_id ON applications(user_id)"
+        )
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_applications_status_id ON applications(status, id DESC)"
+        )
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_history_application_id ON application_history(application_id, id DESC)"
+        )
         await db.commit()
 
 
@@ -1075,23 +1158,68 @@ async def get_application(application_id: int):
         return await cursor.fetchone()
 
 
-async def disable_staff_application_keyboard(bot: Bot, application) -> None:
-    """Убирает кнопки решения с исходной карточки заявки в STAFF."""
-    staff_message_id = application["staff_message_id"]
-    if not staff_message_id:
-        return
+def _application_answers(application) -> dict[str, str] | None:
+    raw = application["answers_json"]
+    if not raw:
+        return None
     try:
-        await bot.edit_message_reply_markup(
+        parsed = json.loads(raw)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    return {str(key): str(value) for key, value in parsed.items()}
+
+
+async def refresh_staff_application_message(bot: Bot, application_id: int) -> None:
+    """Синхронизирует исходную STAFF-карточку с фактическим статусом из БД."""
+    application = await get_application(application_id)
+    if application is None or not application["staff_message_id"]:
+        return
+
+    answers = _application_answers(application)
+    try:
+        if answers is None:
+            await bot.edit_message_reply_markup(
+                chat_id=ADMIN_CHAT_ID,
+                message_id=int(application["staff_message_id"]),
+                reply_markup=None,
+            )
+            return
+
+        await bot.edit_message_text(
             chat_id=ADMIN_CHAT_ID,
-            message_id=int(staff_message_id),
-            reply_markup=None,
+            message_id=int(application["staff_message_id"]),
+            text=build_staff_card(
+                int(application["id"]),
+                answers,
+                status=str(application["status"]),
+                rejection_reason=application["rejection_reason"],
+            ),
+            reply_markup=(
+                admin_keyboard(int(application["id"]))
+                if application["status"] == "pending"
+                else None
+            ),
         )
+    except TelegramBadRequest as exc:
+        if "message is not modified" not in str(exc).lower():
+            logger.debug(
+                "failed to refresh STAFF message for application #%s",
+                application_id,
+                exc_info=True,
+            )
     except Exception:
         logger.debug(
-            "failed to disable STAFF keyboard for application #%s",
-            application["id"],
+            "failed to refresh STAFF message for application #%s",
+            application_id,
             exc_info=True,
         )
+
+
+async def disable_staff_application_keyboard(bot: Bot, application) -> None:
+    """Совместимость: финализирует исходную карточку либо хотя бы убирает кнопки."""
+    await refresh_staff_application_message(bot, int(application["id"]))
 
 
 # =========================================================
@@ -1200,6 +1328,62 @@ def is_staff_admin(message: Message) -> bool:
     return admin_allowed(message.from_user.id)
 
 
+async def _remove_staff_messages(bot: Bot, rows) -> tuple[set[int], int, int]:
+    """Удаляет связанные STAFF-сообщения без удержания транзакции SQLite."""
+    success_ids: set[int] = set()
+    removed = 0
+    failed = 0
+    attempted: set[int] = set()
+
+    for row in rows:
+        staff_message_id = row[1]
+        decision_message_id = row[2]
+        for raw_message_id in (staff_message_id, decision_message_id):
+            if not raw_message_id:
+                continue
+            message_id = int(raw_message_id)
+            if message_id in attempted:
+                continue
+            attempted.add(message_id)
+            try:
+                await bot.delete_message(ADMIN_CHAT_ID, message_id)
+                success_ids.add(message_id)
+                removed += 1
+            except TelegramBadRequest as exc:
+                if "message to delete not found" in str(exc).lower():
+                    # Сообщения уже нет, значит ссылку на него безопасно забыть.
+                    success_ids.add(message_id)
+                else:
+                    failed += 1
+                    logger.warning(
+                        "failed to delete STAFF message %s",
+                        message_id,
+                        exc_info=True,
+                    )
+            except Exception:
+                failed += 1
+                logger.warning(
+                    "failed to delete STAFF message %s",
+                    message_id,
+                    exc_info=True,
+                )
+
+    return success_ids, removed, failed
+
+
+async def _next_application_id() -> tuple[int, int]:
+    """Возвращает (последний существующий ID, следующий AUTOINCREMENT ID)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("SELECT MAX(id) FROM applications")
+        last_existing = int((await cursor.fetchone())[0] or 0)
+        cursor = await db.execute(
+            "SELECT seq FROM sqlite_sequence WHERE name = 'applications'"
+        )
+        row = await cursor.fetchone()
+        last_issued = int(row[0]) if row and row[0] is not None else last_existing
+    return last_existing, last_issued + 1
+
+
 @router.message(Command("apps"))
 async def cmd_apps(message: Message):
     if not is_staff_admin(message):
@@ -1212,15 +1396,14 @@ async def cmd_apps(message: Message):
             "SELECT COUNT(*) FROM applications WHERE status = 'pending'"
         )
         pending = int((await cursor.fetchone())[0])
-        cursor = await db.execute("SELECT MAX(id) FROM applications")
-        last_id = int((await cursor.fetchone())[0] or 0)
 
+    last_id, next_id = await _next_application_id()
     await message.answer(
         "📊 <b>Статистика заявок</b>\n\n"
         f"📋 Всего заявок в базе: <b>{total}</b>\n"
         f"⏳ На рассмотрении: <b>{pending}</b>\n"
-        f"🔢 Последний номер: <b>{last_id}</b>\n"
-        f"➡️ Следующий номер: <b>{last_id + 1}</b>"
+        f"🔢 Последний существующий номер: <b>{last_id}</b>\n"
+        f"➡️ Следующий номер: <b>{next_id}</b>"
     )
 
 
@@ -1233,102 +1416,76 @@ async def cmd_clearapps(message: Message):
     if len(parts) != 2:
         await message.answer(
             "Использование:\n"
-            "<code>/clearapps 5</code> — удалить 5 последних заявок и все связанные сообщения бота\n"
-            "<code>/clearapps all</code> — удалить все заявки, связанные сообщения и обнулить счётчик"
+            "<code>/clearapps 5</code> — удалить 5 последних заявок и связанные сообщения\n"
+            "<code>/clearapps all</code> — удалить все заявки и связанные сообщения\n\n"
+            "🔐 Номера заявок намеренно не переиспользуются."
         )
         return
 
     value = parts[1].strip().lower()
-
-    async with aiosqlite.connect(DB_PATH) as db:
-        if value == "all":
-            cursor = await db.execute(
-                "SELECT id, staff_message_id, decision_message_id "
-                "FROM applications ORDER BY id DESC"
-            )
-            rows = await cursor.fetchall()
-
-            deleted_messages = 0
-            attempted_ids = set()
-            for _, staff_message_id, decision_message_id in rows:
-                for message_id in (staff_message_id, decision_message_id):
-                    if not message_id or int(message_id) in attempted_ids:
-                        continue
-                    attempted_ids.add(int(message_id))
-                    try:
-                        await message.bot.delete_message(
-                            chat_id=ADMIN_CHAT_ID,
-                            message_id=int(message_id),
-                        )
-                        deleted_messages += 1
-                    except Exception:
-                        logger.debug("failed to delete STAFF message %s", message_id, exc_info=True)
-
-            await db.execute("DELETE FROM application_history")
-            await db.execute("DELETE FROM applications")
-            await db.execute("DELETE FROM sqlite_sequence WHERE name='applications'")
-            await db.execute("DELETE FROM sqlite_sequence WHERE name='application_history'")
-            await db.commit()
-
-            await message.answer(
-                "🗑 <b>Все заявки удалены.</b>\n\n"
-                f"Удалено связанных сообщений бота: <b>{deleted_messages}</b>\n"
-                "🔄 Счётчик обнулён. Следующая заявка будет <b>#1</b>."
-            )
-            return
-
+    count: int | None
+    if value == "all":
+        count = None
+    else:
         try:
             count = int(value)
         except ValueError:
             await message.answer("❌ Укажи целое число или <code>all</code>.")
             return
-
         if count <= 0:
             await message.answer("❌ Количество должно быть больше 0.")
             return
 
-        cursor = await db.execute(
-            "SELECT id, staff_message_id, decision_message_id "
-            "FROM applications ORDER BY id DESC LIMIT ?",
-            (count,),
-        )
+    # Снимок и удаление из БД делаем одной короткой write-транзакцией.
+    # Сетевые вызовы Telegram выполняются уже после commit, чтобы не держать lock.
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("BEGIN IMMEDIATE")
+        if count is None:
+            cursor = await db.execute(
+                "SELECT id, staff_message_id, decision_message_id "
+                "FROM applications ORDER BY id DESC"
+            )
+        else:
+            cursor = await db.execute(
+                "SELECT id, staff_message_id, decision_message_id "
+                "FROM applications ORDER BY id DESC LIMIT ?",
+                (count,),
+            )
         rows = await cursor.fetchall()
+        ids = [int(row[0]) for row in rows]
 
-        deleted_messages = 0
-        deleted_rows = 0
-        attempted_ids = set()
-
-        for internal_id, staff_message_id, decision_message_id in rows:
-            for message_id in (staff_message_id, decision_message_id):
-                if not message_id or int(message_id) in attempted_ids:
-                    continue
-                attempted_ids.add(int(message_id))
-                try:
-                    await message.bot.delete_message(
-                        chat_id=ADMIN_CHAT_ID,
-                        message_id=int(message_id),
-                    )
-                    deleted_messages += 1
-                except Exception:
-                    logger.debug("failed to delete STAFF message %s", message_id, exc_info=True)
-
-            await db.execute(
+        if ids:
+            await db.executemany(
                 "DELETE FROM application_history WHERE application_id = ?",
-                (internal_id,),
+                [(application_id,) for application_id in ids],
             )
-            await db.execute(
+            await db.executemany(
                 "DELETE FROM applications WHERE id = ?",
-                (internal_id,),
+                [(application_id,) for application_id in ids],
             )
-            deleted_rows += 1
-
         await db.commit()
 
-    await message.answer(
-        f"🗑 Удалено заявок: <b>{deleted_rows}</b>\n"
-        f"Удалено связанных сообщений бота: <b>{deleted_messages}</b>\n\n"
-        "🔢 Счётчик не обнулён. Для полного сброса используй <code>/clearapps all</code>."
+    _, deleted_messages, failed_messages = await _remove_staff_messages(
+        message.bot,
+        rows,
     )
+    _, next_id = await _next_application_id()
+
+    if count is None:
+        await message.answer(
+            "🗑 <b>Все заявки удалены.</b>\n\n"
+            f"Удалено связанных сообщений: <b>{deleted_messages}</b>\n"
+            f"Не удалось удалить сообщений: <b>{failed_messages}</b>\n"
+            f"➡️ Следующая заявка получит номер <b>#{next_id}</b>.\n\n"
+            "🔐 Старые номера не переиспользуются — это защищает от старых кнопок в Telegram."
+        )
+    else:
+        await message.answer(
+            f"🗑 Удалено заявок: <b>{len(rows)}</b>\n"
+            f"Удалено связанных сообщений: <b>{deleted_messages}</b>\n"
+            f"Не удалось удалить сообщений: <b>{failed_messages}</b>\n"
+            f"➡️ Следующая заявка: <b>#{next_id}</b>."
+        )
 
 
 @router.message(Command("clearstaff"))
@@ -1342,40 +1499,18 @@ async def cmd_clearstaff(message: Message):
         )
         rows = await cursor.fetchall()
 
-    deleted = 0
-    failed = 0
-    delete_results: dict[int, bool] = {}
+    success_ids, deleted, failed = await _remove_staff_messages(message.bot, rows)
 
-    async def delete_once(message_id: int) -> bool:
-        nonlocal deleted, failed
-        if message_id in delete_results:
-            return delete_results[message_id]
-        try:
-            await message.bot.delete_message(ADMIN_CHAT_ID, message_id)
-            deleted += 1
-            result = True
-        except TelegramBadRequest as exc:
-            if "message to delete not found" in str(exc).lower():
-                result = True
-            else:
-                failed += 1
-                logger.warning("failed to delete STAFF message %s", message_id, exc_info=True)
-                result = False
-        except Exception:
-            failed += 1
-            logger.warning("failed to delete STAFF message %s", message_id, exc_info=True)
-            result = False
-        delete_results[message_id] = result
-        return result
-
+    # После сетевых вызовов коротко синхронизируем только реально удалённые/отсутствующие ID.
     async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("BEGIN IMMEDIATE")
         for application_id, staff_message_id, decision_message_id in rows:
-            if staff_message_id and await delete_once(int(staff_message_id)):
+            if staff_message_id and int(staff_message_id) in success_ids:
                 await db.execute(
                     "UPDATE applications SET staff_message_id = NULL WHERE id = ?",
                     (application_id,),
                 )
-            if decision_message_id and await delete_once(int(decision_message_id)):
+            if decision_message_id and int(decision_message_id) in success_ids:
                 await db.execute(
                     "UPDATE applications SET decision_message_id = NULL WHERE id = ?",
                     (application_id,),
@@ -1390,7 +1525,7 @@ async def cmd_clearstaff(message: Message):
     await message.answer(
         f"🧹 Удалено сообщений бота из STAFF: <b>{deleted}</b>\n"
         f"⚠️ Не удалось удалить: <b>{failed}</b>\n"
-        "Заявки и счётчик базы не изменены. Неудалённые ID сохранены для повторной попытки."
+        "Заявки и их номера не изменены. Неудалённые ID сохранены для повторной попытки."
     )
 
 
@@ -1399,23 +1534,13 @@ async def cmd_resetcounter(message: Message):
     if not is_staff_admin(message):
         return
 
-    async with aiosqlite.connect(DB_PATH) as db:
-        cursor=await db.execute("SELECT COUNT(*) FROM applications")
-        total=int((await cursor.fetchone())[0])
-        if total:
-            await message.answer(
-                "⚠️ Нельзя обнулить счётчик, пока в базе есть заявки.\n\n"
-                "Сначала используй <code>/clearapps all</code>."
-            )
-            return
-        await db.execute("DELETE FROM sqlite_sequence WHERE name='applications'")
-        await db.commit()
-
+    _, next_id = await _next_application_id()
     await message.answer(
-        "🔄 <b>Счётчик заявок обнулён.</b>\n"
-        "Следующая заявка получит номер <b>#1</b>."
+        "🔐 <b>Сброс номеров отключён.</b>\n\n"
+        "Повторное использование номера заявки небезопасно: в Telegram может остаться "
+        "старое сообщение с кнопками этого номера.\n\n"
+        f"Следующая заявка получит номер <b>#{next_id}</b>."
     )
-
 
 
 # =========================================================
@@ -1740,9 +1865,9 @@ async def admin_manage_help(callback: CallbackQuery):
         await callback.message.edit_text(
             "🧹 <b>УПРАВЛЕНИЕ ЗАЯВКАМИ</b>\n\n"
             "<code>/clearapps 5</code> — удалить 5 последних\n"
-            "<code>/clearapps all</code> — удалить всё и обнулить счётчик\n"
+            "<code>/clearapps all</code> — удалить все заявки, сохранив уникальность номеров\n"
             "<code>/clearstaff</code> — убрать сообщения бота из STAFF\n"
-            "<code>/resetcounter</code> — обнулить счётчик при пустой базе",
+            "<code>/resetcounter</code> — показать, почему сброс номеров отключён",
             reply_markup=admin_back_keyboard(),
         )
 
@@ -1827,103 +1952,333 @@ async def custom_header_preview(callback: CallbackQuery):
         )
 
 
+def _question_index_from_callback(data: str | None) -> int | None:
+    try:
+        index = int((data or "").rsplit(":", 1)[1])
+    except (IndexError, ValueError):
+        return None
+    return index if 0 <= index < len(QUESTIONS) else None
+
+
+async def _configured_questions_keyboard(prefix: str = "custom:q"):
+    rows = []
+    for index, question in enumerate(QUESTIONS):
+        cfg = await get_question_config(question)
+        rows.append([
+            InlineKeyboardButton(
+                text=f"{index + 1}. {cfg['title'][:50]}",
+                callback_data=f"{prefix}:{index}",
+            )
+        ])
+    rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="admin:custom")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _handle_admin_state_command(message: Message, state: FSMContext) -> bool:
+    text = (message.text or "").strip()
+    if not text.startswith("/"):
+        return False
+
+    command = text.split(maxsplit=1)[0].split("@", 1)[0].lower()
+    if command in {"/cancel", "/start"}:
+        await state.clear()
+        await message.answer("❌ Редактирование отменено.")
+        await render_admin_panel(message)
+    else:
+        await message.answer(
+            "ℹ️ Сейчас открыт режим редактирования. "
+            "Заверши его или используй /cancel."
+        )
+    return True
+
+
 @router.callback_query(F.data == "custom:emoji")
 async def custom_emoji_menu(callback: CallbackQuery):
     if not admin_allowed(callback.from_user.id):
-        await callback.answer("Нет доступа.", show_alert=True); return
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
     await callback.answer()
     if callback.message:
-        await callback.message.edit_text("✨ <b>PREMIUM EMOJI</b>\n\nДобавляй Premium Emoji прямо сообщением и назначай его на вопросы.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="➕ Добавить", callback_data="emoji:add")],
-            [InlineKeyboardButton(text="📋 Мои emoji", callback_data="emoji:list")],
-            [InlineKeyboardButton(text="🎯 Назначить на вопрос", callback_data="emoji:assign")],
-            [InlineKeyboardButton(text="◀️ Назад", callback_data="admin:custom")],
-        ]))
+        await callback.message.edit_text(
+            "✨ <b>PREMIUM EMOJI</b>\n\n"
+            "Добавляй Premium Emoji прямо сообщением и назначай его на вопросы.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="➕ Добавить", callback_data="emoji:add")],
+                [InlineKeyboardButton(text="📋 Мои emoji", callback_data="emoji:list")],
+                [InlineKeyboardButton(text="🎯 Назначить на вопрос", callback_data="emoji:assign")],
+                [InlineKeyboardButton(text="◀️ Назад", callback_data="admin:custom")],
+            ]),
+        )
+
 
 @router.callback_query(F.data == "emoji:add")
 async def emoji_add(callback: CallbackQuery, state: FSMContext):
     if not admin_allowed(callback.from_user.id):
-        await callback.answer("Нет доступа.", show_alert=True); return
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
     await state.set_state(AdminCustomization.waiting_emoji)
     await callback.answer()
-    await callback.message.edit_text("✨ <b>Отправь Premium Emoji</b>\n\nОтправь одним сообщением именно кастомный emoji из Telegram.")
+    if callback.message:
+        await callback.message.edit_text(
+            "✨ <b>Отправь Premium Emoji</b>\n\n"
+            "Отправь одним сообщением именно кастомный emoji из Telegram.\n"
+            "Для выхода используй /cancel."
+        )
+
 
 @router.message(AdminCustomization.waiting_emoji)
 async def emoji_receive(message: Message, state: FSMContext):
-    if not admin_allowed(message.from_user.id): await state.clear(); return
-    entity = next((e for e in (message.entities or []) if e.type == "custom_emoji" and e.custom_emoji_id), None)
+    if not admin_allowed(message.from_user.id):
+        await state.clear()
+        return
+    if await _handle_admin_state_command(message, state):
+        return
+
+    entity = next(
+        (
+            entity
+            for entity in (message.entities or [])
+            if entity.type == "custom_emoji" and entity.custom_emoji_id
+        ),
+        None,
+    )
     if entity is None or not message.text:
-        await message.answer("❌ Кастомный emoji не найден. Отправь Premium Emoji ещё раз."); return
-    fallback = message.text[entity.offset:entity.offset+entity.length] or "✨"
-    name=f"emoji_{entity.custom_emoji_id[-6:]}"
+        await message.answer(
+            "❌ Кастомный emoji не найден. Отправь Premium Emoji ещё раз "
+            "или используй /cancel."
+        )
+        return
+
+    # Для типичного сообщения из одного Premium Emoji offset=0. Если Telegram
+    # прислал сложную строку, не пытаемся угадывать UTF-16 offset и берём
+    # безопасный визуальный fallback.
+    fallback = message.text if len(message.text) <= 4 else "✨"
+    name = f"emoji_{entity.custom_emoji_id[-6:]}"
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("INSERT OR IGNORE INTO custom_emojis(name,emoji_id,fallback,created_at) VALUES(?,?,?,?)", (name,entity.custom_emoji_id,fallback,datetime.now(timezone.utc).isoformat()))
+        cursor = await db.execute(
+            "INSERT OR IGNORE INTO custom_emojis(name, emoji_id, fallback, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            (
+                name,
+                entity.custom_emoji_id,
+                fallback,
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
         await db.commit()
+        inserted = cursor.rowcount == 1
+
     await state.clear()
-    await message.answer(f"✅ <b>Emoji сохранён</b>\n\n{fallback}\nID: <code>{html.escape(entity.custom_emoji_id)}</code>", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ В Premium Emoji", callback_data="custom:emoji")]]))
+    await message.answer(
+        ("✅ <b>Emoji сохранён</b>" if inserted else "ℹ️ <b>Такой Emoji уже был сохранён</b>")
+        + f"\n\n{html.escape(fallback)}\nID: <code>{html.escape(entity.custom_emoji_id)}</code>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="◀️ В Premium Emoji", callback_data="custom:emoji")
+        ]]),
+    )
+
 
 @router.callback_query(F.data == "emoji:list")
 async def emoji_list(callback: CallbackQuery):
-    if not admin_allowed(callback.from_user.id): await callback.answer("Нет доступа.", show_alert=True); return
+    if not admin_allowed(callback.from_user.id):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
     async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory=aiosqlite.Row
-        rows=await (await db.execute("SELECT * FROM custom_emojis ORDER BY id DESC")).fetchall()
-    text="📋 <b>МОИ PREMIUM EMOJI</b>\n\n"
-    text += "\n".join(f"{r['fallback']} <b>{html.escape(r['name'])}</b> — <code>{html.escape(r['emoji_id'])}</code>" for r in rows) if rows else "Пока пусто."
+        db.row_factory = aiosqlite.Row
+        rows = await (await db.execute(
+            "SELECT * FROM custom_emojis ORDER BY id DESC"
+        )).fetchall()
+
+    text = "📋 <b>МОИ PREMIUM EMOJI</b>\n\n"
+    if rows:
+        text += "\n".join(
+            f"{html.escape(row['fallback'])} <b>{html.escape(row['name'])}</b> — "
+            f"<code>{html.escape(row['emoji_id'])}</code>"
+            for row in rows
+        )
+    else:
+        text += "Пока пусто."
+
     await callback.answer()
-    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Назад", callback_data="custom:emoji")]]))
+    if callback.message:
+        await callback.message.edit_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="◀️ Назад", callback_data="custom:emoji")
+            ]]),
+        )
+
 
 @router.callback_query(F.data == "emoji:assign")
 async def emoji_assign(callback: CallbackQuery):
-    if not admin_allowed(callback.from_user.id): await callback.answer("Нет доступа.", show_alert=True); return
-    await callback.answer(); await callback.message.edit_text("🎯 <b>Выбери вопрос:</b>", reply_markup=customization_questions_keyboard("emoji:q"))
+    if not admin_allowed(callback.from_user.id):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    await callback.answer()
+    if callback.message:
+        await callback.message.edit_text(
+            "🎯 <b>Выбери вопрос:</b>",
+            reply_markup=await _configured_questions_keyboard("emoji:q"),
+        )
+
 
 @router.callback_query(F.data.startswith("emoji:q:"))
 async def emoji_question(callback: CallbackQuery):
-    if not admin_allowed(callback.from_user.id): await callback.answer("Нет доступа.", show_alert=True); return
-    index=int(callback.data.split(":")[-1]); q=QUESTIONS[index]
+    if not admin_allowed(callback.from_user.id):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    index = _question_index_from_callback(callback.data)
+    if index is None:
+        await callback.answer("Некорректный вопрос.", show_alert=True)
+        return
+
+    question = QUESTIONS[index]
+    cfg = await get_question_config(question)
     async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory=aiosqlite.Row
-        rows=await (await db.execute("SELECT * FROM custom_emojis ORDER BY id DESC")).fetchall()
-    buttons=[[InlineKeyboardButton(text=f"{r['fallback']} {r['name']}", callback_data=f"emoji:set:{index}:{r['id']}")] for r in rows]
+        db.row_factory = aiosqlite.Row
+        rows = await (await db.execute(
+            "SELECT * FROM custom_emojis ORDER BY id DESC"
+        )).fetchall()
+
+    buttons = [
+        [InlineKeyboardButton(
+            text=f"{row['fallback']} {row['name']}",
+            callback_data=f"emoji:set:{index}:{row['id']}",
+        )]
+        for row in rows
+    ]
     buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="emoji:assign")])
-    await callback.answer(); await callback.message.edit_text(f"🎯 <b>{html.escape(q['title'])}</b>\n\nВыбери emoji:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+
+    await callback.answer()
+    if callback.message:
+        await callback.message.edit_text(
+            f"🎯 <b>{html.escape(cfg['title'])}</b>\n\n"
+            + ("Выбери emoji:" if rows else "Сначала добавь хотя бы один Premium Emoji."),
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+        )
+
 
 @router.callback_query(F.data.startswith("emoji:set:"))
 async def emoji_set(callback: CallbackQuery):
-    if not admin_allowed(callback.from_user.id): await callback.answer("Нет доступа.", show_alert=True); return
-    _,_,index_s,dbid=callback.data.split(":"); index=int(index_s)
+    if not admin_allowed(callback.from_user.id):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    parts = (callback.data or "").split(":", 3)
+    if len(parts) != 4:
+        await callback.answer("Некорректная кнопка.", show_alert=True)
+        return
+    try:
+        index = int(parts[2])
+        emoji_db_id = int(parts[3])
+    except ValueError:
+        await callback.answer("Некорректная кнопка.", show_alert=True)
+        return
+    if index < 0 or index >= len(QUESTIONS):
+        await callback.answer("Некорректный вопрос.", show_alert=True)
+        return
+
     async with aiosqlite.connect(DB_PATH) as db:
-        row=await (await db.execute("SELECT emoji_id FROM custom_emojis WHERE id=?", (int(dbid),))).fetchone()
-    if not row: await callback.answer("Emoji не найден", show_alert=True); return
+        row = await (await db.execute(
+            "SELECT emoji_id FROM custom_emojis WHERE id = ?",
+            (emoji_db_id,),
+        )).fetchone()
+    if not row:
+        await callback.answer("Emoji не найден.", show_alert=True)
+        return
+
     await set_custom_value(f"question:{QUESTIONS[index]['key']}:emoji_id", row[0])
-    await callback.answer("Назначен ✅"); await callback.message.edit_text("✅ Emoji назначен.", reply_markup=custom_question_keyboard(index))
+    await callback.answer("Назначен ✅")
+    if callback.message:
+        await callback.message.edit_text(
+            "✅ Emoji назначен.",
+            reply_markup=custom_question_keyboard(index),
+        )
+
 
 @router.callback_query(F.data == "custom:texts")
 async def custom_texts(callback: CallbackQuery):
-    if not admin_allowed(callback.from_user.id): await callback.answer("Нет доступа.", show_alert=True); return
-    await callback.answer(); await callback.message.edit_text("📝 <b>ТЕКСТЫ ВОПРОСОВ</b>\n\nВыбери вопрос:", reply_markup=customization_questions_keyboard())
+    if not admin_allowed(callback.from_user.id):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    await callback.answer()
+    if callback.message:
+        await callback.message.edit_text(
+            "📝 <b>ТЕКСТЫ ВОПРОСОВ</b>\n\nВыбери вопрос:",
+            reply_markup=await _configured_questions_keyboard(),
+        )
+
 
 @router.callback_query(F.data.startswith("custom:q:"))
 async def custom_q(callback: CallbackQuery):
-    if not admin_allowed(callback.from_user.id): await callback.answer("Нет доступа.", show_alert=True); return
-    index=int(callback.data.split(":")[-1]); q=QUESTIONS[index]; cfg=await get_question_config(q)
-    await callback.answer(); await callback.message.edit_text(f"📝 <b>Вопрос {index+1}</b>\n\n<b>Заголовок:</b> {html.escape(cfg['title'])}\n<b>Подсказка:</b> {html.escape(cfg['hint'])}", reply_markup=custom_question_keyboard(index))
+    if not admin_allowed(callback.from_user.id):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    index = _question_index_from_callback(callback.data)
+    if index is None:
+        await callback.answer("Некорректный вопрос.", show_alert=True)
+        return
+    question = QUESTIONS[index]
+    cfg = await get_question_config(question)
+    await callback.answer()
+    if callback.message:
+        await callback.message.edit_text(
+            f"📝 <b>Вопрос {index + 1}</b>\n\n"
+            f"<b>Заголовок:</b> {html.escape(cfg['title'])}\n"
+            f"<b>Подсказка:</b> {html.escape(cfg['hint'])}",
+            reply_markup=custom_question_keyboard(index),
+        )
+
 
 @router.callback_query(F.data.startswith("custom:title:"))
 async def custom_title(callback: CallbackQuery, state: FSMContext):
-    if not admin_allowed(callback.from_user.id): await callback.answer("Нет доступа.", show_alert=True); return
-    index=int(callback.data.split(":")[-1]); await state.set_state(AdminCustomization.waiting_text); await state.update_data(custom_field="title", custom_question=index); await callback.answer(); await callback.message.edit_text("✏️ Отправь новый заголовок одним сообщением.")
+    if not admin_allowed(callback.from_user.id):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    index = _question_index_from_callback(callback.data)
+    if index is None:
+        await callback.answer("Некорректный вопрос.", show_alert=True)
+        return
+    await state.set_state(AdminCustomization.waiting_text)
+    await state.update_data(custom_field="title", custom_question=index)
+    await callback.answer()
+    if callback.message:
+        await callback.message.edit_text(
+            "✏️ Отправь новый заголовок одним сообщением.\n"
+            "Для выхода используй /cancel."
+        )
+
 
 @router.callback_query(F.data.startswith("custom:hint:"))
 async def custom_hint(callback: CallbackQuery, state: FSMContext):
-    if not admin_allowed(callback.from_user.id): await callback.answer("Нет доступа.", show_alert=True); return
-    index=int(callback.data.split(":")[-1]); await state.set_state(AdminCustomization.waiting_text); await state.update_data(custom_field="hint", custom_question=index); await callback.answer(); await callback.message.edit_text("💡 Отправь новую подсказку одним сообщением.")
+    if not admin_allowed(callback.from_user.id):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    index = _question_index_from_callback(callback.data)
+    if index is None:
+        await callback.answer("Некорректный вопрос.", show_alert=True)
+        return
+    await state.set_state(AdminCustomization.waiting_text)
+    await state.update_data(custom_field="hint", custom_question=index)
+    await callback.answer()
+    if callback.message:
+        await callback.message.edit_text(
+            "💡 Отправь новую подсказку одним сообщением.\n"
+            "Для выхода используй /cancel."
+        )
+
 
 @router.message(AdminCustomization.waiting_text)
 async def custom_text_receive(message: Message, state: FSMContext):
-    if not admin_allowed(message.from_user.id): await state.clear(); return
-    text=(message.text or "").strip(); data=await state.get_data(); index=int(data.get("custom_question",-1)); field=data.get("custom_field")
+    if not admin_allowed(message.from_user.id):
+        await state.clear()
+        return
+    if await _handle_admin_state_command(message, state):
+        return
+
+    text = (message.text or "").strip()
+    data = await state.get_data()
+    field = data.get("custom_field")
+
     if field == "application_header":
         if not text:
             await message.answer("❌ Заголовок не может быть пустым.")
@@ -1939,13 +2294,19 @@ async def custom_text_receive(message: Message, state: FSMContext):
         )
         return
 
+    try:
+        index = int(data.get("custom_question", -1))
+    except (TypeError, ValueError):
+        index = -1
     if not text or index < 0 or index >= len(QUESTIONS) or field not in {"title", "hint"}:
-        await message.answer("❌ Некорректный текст.")
+        await message.answer("❌ Некорректный текст. Используй /cancel и попробуй снова.")
         return
+
     max_len = 200 if field == "title" else 800
     if len(text) > max_len:
         await message.answer(f"❌ Слишком длинный текст. Максимум {max_len} символов.")
         return
+
     await set_custom_value(f"question:{QUESTIONS[index]['key']}:{field}", text)
     await state.clear()
     await message.answer("✅ Сохранено.", reply_markup=custom_question_keyboard(index))
@@ -1953,38 +2314,106 @@ async def custom_text_receive(message: Message, state: FSMContext):
 
 @router.callback_query(F.data.startswith("custom:emoji_for:"))
 async def custom_emoji_for(callback: CallbackQuery):
-    if not admin_allowed(callback.from_user.id): await callback.answer("Нет доступа.", show_alert=True); return
-    index=int(callback.data.split(":")[-1])
+    if not admin_allowed(callback.from_user.id):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    index = _question_index_from_callback(callback.data)
+    if index is None:
+        await callback.answer("Некорректный вопрос.", show_alert=True)
+        return
+
     async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory=aiosqlite.Row
-        rows=await (await db.execute("SELECT * FROM custom_emojis ORDER BY id DESC")).fetchall()
-    buttons=[[InlineKeyboardButton(text=f"{r['fallback']} {r['name']}", callback_data=f"emoji:set:{index}:{r['id']}")] for r in rows]
-    buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data=f"custom:q:{index}")])
-    await callback.answer(); await callback.message.edit_text("✨ <b>Выбери Premium Emoji</b>", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+        db.row_factory = aiosqlite.Row
+        rows = await (await db.execute(
+            "SELECT * FROM custom_emojis ORDER BY id DESC"
+        )).fetchall()
+    buttons = [
+        [InlineKeyboardButton(
+            text=f"{row['fallback']} {row['name']}",
+            callback_data=f"emoji:set:{index}:{row['id']}",
+        )]
+        for row in rows
+    ]
+    buttons.append([
+        InlineKeyboardButton(text="◀️ Назад", callback_data=f"custom:q:{index}")
+    ])
+    await callback.answer()
+    if callback.message:
+        await callback.message.edit_text(
+            "✨ <b>Выбери Premium Emoji</b>\n\n"
+            + ("" if rows else "Сначала добавь хотя бы один emoji."),
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+        )
+
 
 @router.callback_query(F.data.startswith("custom:preview_question:"))
 async def custom_preview_question(callback: CallbackQuery):
-    if not admin_allowed(callback.from_user.id): await callback.answer("Нет доступа.", show_alert=True); return
-    index=int(callback.data.split(":")[-1]); q=QUESTIONS[index]; icon,title,hint=await build_question_visual(q)
-    await callback.answer(); await callback.message.edit_text(f"👁 <b>ПРЕВЬЮ — {index+1}/{len(QUESTIONS)}</b>\n\n{icon} {title}\n\n💡 {hint}\n\nВыбери ответ ниже в реальной анкете.", reply_markup=custom_question_keyboard(index))
+    if not admin_allowed(callback.from_user.id):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    index = _question_index_from_callback(callback.data)
+    if index is None:
+        await callback.answer("Некорректный вопрос.", show_alert=True)
+        return
+    question = QUESTIONS[index]
+    icon, title, hint = await build_question_visual(question)
+    await callback.answer()
+    if callback.message:
+        await callback.message.edit_text(
+            f"👁 <b>ПРЕВЬЮ — {index + 1}/{len(QUESTIONS)}</b>\n\n"
+            f"{icon} {title}\n\n💡 {hint}\n\n"
+            "Выбери ответ ниже в реальной анкете.",
+            reply_markup=custom_question_keyboard(index),
+        )
+
 
 @router.callback_query(F.data == "custom:preview")
 async def custom_preview(callback: CallbackQuery):
-    if not admin_allowed(callback.from_user.id): await callback.answer("Нет доступа.", show_alert=True); return
-    await callback.answer(); await callback.message.edit_text("👁 <b>ПРЕВЬЮ ВОПРОСОВ</b>\n\nВыбери вопрос:", reply_markup=customization_questions_keyboard("custom:preview_question"))
+    if not admin_allowed(callback.from_user.id):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    await callback.answer()
+    if callback.message:
+        await callback.message.edit_text(
+            "👁 <b>ПРЕВЬЮ ВОПРОСОВ</b>\n\nВыбери вопрос:",
+            reply_markup=await _configured_questions_keyboard("custom:preview_question"),
+        )
+
 
 @router.callback_query(F.data == "custom:style")
 async def custom_style(callback: CallbackQuery):
-    if not admin_allowed(callback.from_user.id): await callback.answer("Нет доступа.", show_alert=True); return
-    current=await get_custom_value("question:text_style",DEFAULT_TEXT_STYLE)
-    await callback.answer(); await callback.message.edit_text("🔤 <b>СТИЛЬ ТЕКСТА</b>\n\nДоступны только стили форматирования Telegram. Произвольный шрифт боту выбрать нельзя.", reply_markup=text_style_keyboard(current))
+    if not admin_allowed(callback.from_user.id):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    current = await get_custom_value("question:text_style", DEFAULT_TEXT_STYLE)
+    if current not in TEXT_STYLES:
+        current = DEFAULT_TEXT_STYLE
+    await callback.answer()
+    if callback.message:
+        await callback.message.edit_text(
+            "🔤 <b>СТИЛЬ ТЕКСТА</b>\n\n"
+            "Доступны только стили форматирования Telegram. "
+            "Произвольный шрифт боту выбрать нельзя.",
+            reply_markup=text_style_keyboard(current),
+        )
+
 
 @router.callback_query(F.data.startswith("custom:style:set:"))
 async def custom_style_set(callback: CallbackQuery):
-    if not admin_allowed(callback.from_user.id): await callback.answer("Нет доступа.", show_alert=True); return
-    style=callback.data.split(":")[-1]
-    if style not in TEXT_STYLES: await callback.answer("Недоступно", show_alert=True); return
-    await set_custom_value("question:text_style",style); await callback.answer("Сохранено ✅"); await callback.message.edit_text(f"🔤 <b>Стиль:</b> {TEXT_STYLES[style]}", reply_markup=text_style_keyboard(style))
+    if not admin_allowed(callback.from_user.id):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    style = (callback.data or "").split(":")[-1]
+    if style not in TEXT_STYLES:
+        await callback.answer("Недоступно.", show_alert=True)
+        return
+    await set_custom_value("question:text_style", style)
+    await callback.answer("Сохранено ✅")
+    if callback.message:
+        await callback.message.edit_text(
+            f"🔤 <b>Стиль:</b> {html.escape(TEXT_STYLES[style])}",
+            reply_markup=text_style_keyboard(style),
+        )
 
 @router.callback_query(F.data.startswith("application:details:"))
 async def application_details(callback: CallbackQuery):
@@ -2341,10 +2770,37 @@ async def cmd_id(message: Message):
 # /CANCEL
 # =========================================================
 
+def _state_matches(current_state: str | None, target: State) -> bool:
+    return current_state == target or current_state == target.state
+
+
+def _is_application_state(current_state: str | None) -> bool:
+    return (
+        _state_matches(current_state, ApplicationForm.filling)
+        or _state_matches(current_state, ApplicationForm.confirming)
+    )
+
+
 @router.message(Command("cancel"))
 async def cmd_cancel(message: Message, state: FSMContext):
-    await state.clear()
+    current_state = await state.get_state()
+
+    if admin_allowed(message.from_user.id):
+        await state.clear()
+        if current_state:
+            await message.answer("❌ Текущее действие администратора отменено.")
+        await render_admin_panel(message)
+        return
+
     row = await get_latest_user_application(message.from_user.id)
+    if not _is_application_state(current_state):
+        await message.answer(
+            "ℹ️ Сейчас нет активного заполнения анкеты.",
+            reply_markup=user_dashboard_keyboard(row["status"] if row else None),
+        )
+        return
+
+    await state.clear()
     await message.answer(
         "❌ Заполнение анкеты отменено.",
         reply_markup=user_dashboard_keyboard(row["status"] if row else None),
@@ -2357,6 +2813,21 @@ async def cmd_cancel(message: Message, state: FSMContext):
 
 @router.callback_query(F.data == "apply:start")
 async def start_application(callback: CallbackQuery, state: FSMContext):
+    if admin_allowed(callback.from_user.id):
+        await callback.answer(
+            "Администраторский аккаунт не может подавать анкету.",
+            show_alert=True,
+        )
+        return
+
+    current_state = await state.get_state()
+    if _is_application_state(current_state):
+        await callback.answer(
+            "Анкета уже заполняется. Используй текущие кнопки или /cancel.",
+            show_alert=True,
+        )
+        return
+
     blocked_status = await get_submission_block_status(callback.from_user.id)
     if blocked_status == "accepted":
         await callback.answer(
@@ -2371,12 +2842,18 @@ async def start_application(callback: CallbackQuery, state: FSMContext):
         )
         return
 
+    session_id = secrets.token_hex(4)
     await state.clear()
     await state.set_state(ApplicationForm.filling)
-    await state.update_data(step=0, answers={}, custom_step=None)
+    await state.update_data(
+        step=0,
+        answers={},
+        custom_step=None,
+        editing_step=None,
+        session_id=session_id,
+    )
 
     await callback.answer()
-
     if callback.message:
         await show_step(callback.message, state, 0, edit=True)
 
@@ -2385,8 +2862,20 @@ async def start_application(callback: CallbackQuery, state: FSMContext):
 # ОТМЕНА
 # =========================================================
 
-@router.callback_query(F.data == "form:cancel")
+@router.callback_query(F.data.startswith("form:cancel:"))
 async def cancel_form(callback: CallbackQuery, state: FSMContext):
+    parts = (callback.data or "").split(":", 2)
+    if len(parts) != 3:
+        await callback.answer("Некорректная кнопка.", show_alert=True)
+        return
+
+    current_state = await state.get_state()
+    if not _is_application_state(current_state):
+        await callback.answer("Эта анкета уже неактуальна.", show_alert=True)
+        return
+    if not await _validate_form_session(callback, state, parts[2]):
+        return
+
     await state.clear()
     await callback.answer("Анкета отменена.")
 
@@ -2402,18 +2891,22 @@ async def cancel_form(callback: CallbackQuery, state: FSMContext):
 # НАЗАД
 # =========================================================
 
-@router.callback_query(F.data == "form:back")
+@router.callback_query(F.data.startswith("form:back:"))
 async def form_back(callback: CallbackQuery, state: FSMContext):
-    if await state.get_state() != ApplicationForm.filling:
+    parts = (callback.data or "").split(":", 2)
+    if len(parts) != 3:
+        await callback.answer("Некорректная кнопка.", show_alert=True)
+        return
+    if not _state_matches(await state.get_state(), ApplicationForm.filling):
         await callback.answer("Сейчас возврат недоступен.", show_alert=True)
+        return
+    if not await _validate_form_session(callback, state, parts[2]):
         return
 
     data = await state.get_data()
     step = int(data.get("step", 0))
     editing_step = data.get("editing_step")
 
-    # При редактировании одного выбранного поля кнопка «Назад» должна вернуть
-    # к экрану подтверждения, а не незаметно переключить пользователя на другое поле.
     if editing_step is not None:
         await state.set_state(ApplicationForm.confirming)
         await state.update_data(
@@ -2431,7 +2924,6 @@ async def form_back(callback: CallbackQuery, state: FSMContext):
         return
 
     previous_step = step - 1
-    # Не удаляем сохранённые ответы: при возврате новое значение просто перезапишет старое.
     await state.update_data(step=previous_step, custom_step=None)
 
     await callback.answer()
@@ -2445,17 +2937,21 @@ async def form_back(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.startswith("form:choose:"))
 async def form_choose(callback: CallbackQuery, state: FSMContext):
-    if await state.get_state() != ApplicationForm.filling:
+    if not _state_matches(await state.get_state(), ApplicationForm.filling):
         await callback.answer("Анкета уже завершена.", show_alert=True)
         return
 
-    parts = callback.data.split(":", 3)
-    if len(parts) != 4:
+    parts = (callback.data or "").split(":", 4)
+    if len(parts) != 5:
         await callback.answer("Некорректная кнопка.", show_alert=True)
         return
 
+    session_id = parts[2]
+    if not await _validate_form_session(callback, state, session_id):
+        return
+
     try:
-        step = int(parts[2])
+        step = int(parts[3])
     except ValueError:
         await callback.answer("Некорректный шаг.", show_alert=True)
         return
@@ -2473,7 +2969,7 @@ async def form_choose(callback: CallbackQuery, state: FSMContext):
         return
 
     question = QUESTIONS[step]
-    raw_value = parts[3]
+    raw_value = parts[4]
 
     if question["type"] == "yes_no":
         if raw_value not in {"0", "1"}:
@@ -2506,7 +3002,6 @@ async def form_choose(callback: CallbackQuery, state: FSMContext):
     )
 
     await callback.answer()
-
     if editing_step is not None:
         await state.set_state(ApplicationForm.confirming)
         if callback.message:
@@ -2525,13 +3020,20 @@ async def form_choose(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.startswith("form:custom:"))
 async def form_custom(callback: CallbackQuery, state: FSMContext):
-    if await state.get_state() != ApplicationForm.filling:
+    if not _state_matches(await state.get_state(), ApplicationForm.filling):
         await callback.answer("Анкета уже завершена.", show_alert=True)
         return
 
+    parts = (callback.data or "").split(":", 3)
+    if len(parts) != 4:
+        await callback.answer("Некорректная кнопка.", show_alert=True)
+        return
+    if not await _validate_form_session(callback, state, parts[2]):
+        return
+
     try:
-        step = int(callback.data.split(":")[2])
-    except (IndexError, ValueError):
+        step = int(parts[3])
+    except ValueError:
         await callback.answer("Некорректный шаг.", show_alert=True)
         return
 
@@ -2558,7 +3060,7 @@ async def form_custom(callback: CallbackQuery, state: FSMContext):
         await callback.message.edit_text(
             f"✍️ <b>{html.escape(cfg['title'])}</b>\n\n"
             "Напиши свой вариант одним сообщением.",
-            reply_markup=text_question_keyboard(step),
+            reply_markup=text_question_keyboard(step, parts[2]),
         )
 
 
@@ -2592,7 +3094,6 @@ async def form_text_answer(message: Message, state: FSMContext):
         await message.answer("❌ Ответ не может быть пустым.")
         return
 
-    # Фиксированные вопросы нельзя обойти произвольным текстом.
     if custom_step is None and question["type"] in {"rating", "yes_no", "choice"}:
         await message.answer("❌ Выбери вариант кнопкой под текущим вопросом.")
         return
@@ -2609,7 +3110,6 @@ async def form_text_answer(message: Message, state: FSMContext):
 
     answers = dict(data.get("answers", {}))
     answers[question["key"]] = value
-
     next_step = step + 1
 
     await state.update_data(
@@ -2633,25 +3133,38 @@ async def form_text_answer(message: Message, state: FSMContext):
 # РЕДАКТИРОВАНИЕ ПЕРЕД ОТПРАВКОЙ
 # =========================================================
 
-@router.callback_query(F.data == "form:edit")
+@router.callback_query(F.data.startswith("form:edit:"))
 async def edit_form(callback: CallbackQuery, state: FSMContext):
-    if await state.get_state() != ApplicationForm.confirming:
+    parts = (callback.data or "").split(":", 2)
+    if len(parts) != 3:
+        await callback.answer("Некорректная кнопка.", show_alert=True)
+        return
+    if not _state_matches(await state.get_state(), ApplicationForm.confirming):
         await callback.answer("Сейчас редактирование недоступно.", show_alert=True)
+        return
+    if not await _validate_form_session(callback, state, parts[2]):
         return
 
     await callback.answer()
     if callback.message:
         await callback.message.edit_text(
             "✏️ <b>Что изменить?</b>\n\nВыбери конкретный вопрос:",
-            reply_markup=await edit_fields_keyboard(),
+            reply_markup=await edit_fields_keyboard(parts[2]),
         )
 
 
-@router.callback_query(F.data == "form:edit_back")
+@router.callback_query(F.data.startswith("form:edit_back:"))
 async def edit_back(callback: CallbackQuery, state: FSMContext):
-    if await state.get_state() != ApplicationForm.confirming:
+    parts = (callback.data or "").split(":", 2)
+    if len(parts) != 3:
+        await callback.answer("Некорректная кнопка.", show_alert=True)
+        return
+    if not _state_matches(await state.get_state(), ApplicationForm.confirming):
         await callback.answer("Сейчас возврат недоступен.", show_alert=True)
         return
+    if not await _validate_form_session(callback, state, parts[2]):
+        return
+
     await callback.answer()
     if callback.message:
         await show_confirmation(callback.message, state, edit=True)
@@ -2659,12 +3172,19 @@ async def edit_back(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.startswith("form:edit_field:"))
 async def edit_field(callback: CallbackQuery, state: FSMContext):
-    if await state.get_state() != ApplicationForm.confirming:
+    if not _state_matches(await state.get_state(), ApplicationForm.confirming):
         await callback.answer("Сейчас редактирование недоступно.", show_alert=True)
         return
+
+    parts = (callback.data or "").split(":", 3)
+    if len(parts) != 4:
+        await callback.answer("Некорректная кнопка.", show_alert=True)
+        return
+    if not await _validate_form_session(callback, state, parts[2]):
+        return
     try:
-        step = int(callback.data.split(":")[2])
-    except (IndexError, ValueError):
+        step = int(parts[3])
+    except ValueError:
         await callback.answer("Некорректный вопрос.", show_alert=True)
         return
     if step < 0 or step >= len(QUESTIONS):
@@ -2682,18 +3202,22 @@ async def edit_field(callback: CallbackQuery, state: FSMContext):
 # ОТПРАВКА АНКЕТЫ
 # =========================================================
 
-@router.callback_query(F.data == "form:submit")
+@router.callback_query(F.data.startswith("form:submit:"))
 async def submit_application(callback: CallbackQuery, state: FSMContext):
-    if await state.get_state() != ApplicationForm.confirming:
+    parts = (callback.data or "").split(":", 2)
+    if len(parts) != 3:
+        await callback.answer("Некорректная кнопка.", show_alert=True)
+        return
+    if not _state_matches(await state.get_state(), ApplicationForm.confirming):
         await callback.answer("Анкета уже отправлена или отменена.", show_alert=True)
+        return
+    if not await _validate_form_session(callback, state, parts[2]):
         return
 
     user_id = callback.from_user.id
     data = await state.get_data()
     answers = dict(data.get("answers", {}))
-    if len(answers) != len(QUESTIONS) or any(
-        not str(answers.get(question["key"], "")).strip() for question in QUESTIONS
-    ):
+    if any(not str(answers.get(question["key"], "")).strip() for question in QUESTIONS):
         await callback.answer("Не все вопросы заполнены.", show_alert=True)
         return
 
@@ -2702,8 +3226,6 @@ async def submit_application(callback: CallbackQuery, state: FSMContext):
     full_name = callback.from_user.full_name
     now = datetime.now(timezone.utc).isoformat()
 
-    # Проверка и INSERT выполняются в одной write-транзакции.
-    # Это защищает от двух заявок при двойном клике по «Отправить».
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("BEGIN IMMEDIATE")
         cursor = await db.execute(
@@ -2720,13 +3242,15 @@ async def submit_application(callback: CallbackQuery, state: FSMContext):
         blocked = await cursor.fetchone()
         if blocked:
             await db.rollback()
-            await state.clear()
             if blocked[0] == "accepted":
+                await state.clear()
                 await callback.answer(
                     "Твоя заявка уже принята. Новую анкету подавать нельзя.",
                     show_alert=True,
                 )
             else:
+                # Не очищаем FSM: это может быть второй клик по «Отправить», пока
+                # первый запрос ещё отправляет карточку в STAFF.
                 await callback.answer(
                     "У тебя уже есть анкета на рассмотрении.",
                     show_alert=True,
@@ -2737,9 +3261,9 @@ async def submit_application(callback: CallbackQuery, state: FSMContext):
             """
             INSERT INTO applications (
                 user_id, username, full_name, application_text, answers_json,
-                status, created_at, updated_at
+                status, created_at
             )
-            VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)
+            VALUES (?, ?, ?, ?, ?, 'pending', ?)
             """,
             (
                 user_id,
@@ -2748,16 +3272,12 @@ async def submit_application(callback: CallbackQuery, state: FSMContext):
                 application_text,
                 json.dumps(answers, ensure_ascii=False),
                 now,
-                now,
             ),
         )
         application_id = int(cursor.lastrowid)
         await db.commit()
 
     logger.info("application #%s created by user %s", application_id, user_id)
-
-    # В STAFF показываем только полезную карточку для принятия решения.
-    # Telegram username, ID и имя профиля здесь не публикуются.
     admin_text = build_staff_card(application_id, answers)
 
     try:
@@ -2776,7 +3296,7 @@ async def submit_application(callback: CallbackQuery, state: FSMContext):
             await db.execute("DELETE FROM applications WHERE id = ?", (application_id,))
             await db.commit()
         await callback.answer(
-            "Не удалось отправить заявку администрации.",
+            "Не удалось отправить заявку администрации. Попробуй отправить ещё раз.",
             show_alert=True,
         )
         return
@@ -2804,6 +3324,69 @@ async def submit_application(callback: CallbackQuery, state: FSMContext):
             "Результат придёт тебе в этот чат.",
             reply_markup=user_dashboard_keyboard("pending"),
         )
+
+
+def _decision_result_keyboard(application_id: int, status: str):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="🕘 История изменений",
+            callback_data=f"application:history:{application_id}",
+        )],
+        [
+            InlineKeyboardButton(
+                text="⬅️ К заявкам",
+                callback_data=f"admin:{status}",
+            ),
+            InlineKeyboardButton(text="🏠 Панель", callback_data="admin:home"),
+        ],
+    ])
+
+
+async def _finalize_decision_ui(
+    callback: CallbackQuery,
+    application_before,
+    application_id: int,
+) -> None:
+    """Обновляет и исходную STAFF-карточку, и текущий экран администратора."""
+    await refresh_staff_application_message(callback.bot, application_id)
+
+    if not callback.message:
+        return
+
+    staff_message_id = application_before["staff_message_id"]
+    is_original_staff_message = bool(
+        staff_message_id
+        and callback.message.chat.id == ADMIN_CHAT_ID
+        and callback.message.message_id == int(staff_message_id)
+    )
+    if is_original_staff_message:
+        return
+
+    current = await get_application(application_id)
+    if current is None:
+        return
+
+    if current["status"] == "accepted":
+        text = f"✅ <b>Заявка #{application_id} принята.</b>"
+    elif current["status"] == "rejected":
+        reason = html.escape(current["rejection_reason"] or "Причина не указана")
+        text = (
+            f"❌ <b>Заявка #{application_id} отклонена.</b>\n\n"
+            f"Причина: <b>{reason}</b>"
+        )
+    else:
+        return
+
+    try:
+        await callback.message.edit_text(
+            text,
+            reply_markup=_decision_result_keyboard(application_id, str(current["status"])),
+        )
+    except TelegramBadRequest as exc:
+        if "message is not modified" not in str(exc).lower():
+            logger.debug("failed to finalize admin decision UI", exc_info=True)
+    except Exception:
+        logger.debug("failed to finalize admin decision UI", exc_info=True)
 
 
 # =========================================================
@@ -2841,6 +3424,7 @@ async def accept_application(callback: CallbackQuery):
         callback.from_user.full_name,
     )
     if not changed:
+        await _finalize_decision_ui(callback, application, application_id)
         await callback.answer(
             "Эта анкета уже была рассмотрена.",
             show_alert=True,
@@ -2853,13 +3437,7 @@ async def accept_application(callback: CallbackQuery):
     username = application["username"]
     full_name = application["full_name"]
 
-    # Убираем кнопки и с текущего сообщения, и с исходной карточки в STAFF.
-    if callback.message:
-        try:
-            await callback.message.edit_reply_markup(reply_markup=None)
-        except Exception:
-            logger.debug("failed to remove decision keyboard for application #%s", application_id, exc_info=True)
-    await disable_staff_application_keyboard(callback.bot, application)
+    await _finalize_decision_ui(callback, application, application_id)
 
     # Решение всегда публикуем именно в STAFF. Ошибка отправки не откатывает уже принятое решение.
     try:
@@ -2958,12 +3536,13 @@ async def reject_application(callback: CallbackQuery):
         return
 
     if application["status"] != "pending":
+        await _finalize_decision_ui(callback, application, application_id)
         await callback.answer("Эта анкета уже рассмотрена.", show_alert=True)
         return
 
     await callback.answer()
     if callback.message:
-        await callback.message.answer(
+        await callback.message.edit_text(
             f"❌ <b>Почему отклоняем заявку #{application_id}?</b>",
             reply_markup=rejection_keyboard(application_id),
         )
@@ -3005,17 +3584,13 @@ async def reject_reason(callback: CallbackQuery):
         reason,
     )
     if not changed:
+        await _finalize_decision_ui(callback, application, application_id)
         await callback.answer("Эта анкета уже была рассмотрена.", show_alert=True)
         return
 
     await callback.answer("Заявка отклонена")
 
-    if callback.message:
-        try:
-            await callback.message.edit_reply_markup(reply_markup=None)
-        except Exception:
-            logger.debug("failed to remove decision keyboard for application #%s", application_id, exc_info=True)
-    await disable_staff_application_keyboard(callback.bot, application)
+    await _finalize_decision_ui(callback, application, application_id)
 
     try:
         decision_message = await callback.bot.send_message(
