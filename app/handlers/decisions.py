@@ -1,9 +1,12 @@
 """Принятие и отклонение заявок администраторами."""
 
 from aiogram import F
+from aiogram.enums import ChatType
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.exceptions import TelegramForbiddenError
+from aiogram.filters import Command
 from aiogram.types import CallbackQuery
+from aiogram.types import Message
 import aiosqlite
 import html
 
@@ -14,6 +17,56 @@ from app.questions import REJECTION_REASONS
 from app.runtime import router
 from app.services import refresh_staff_application_message
 from app.ui import _decision_result_keyboard, contact_keyboard, rejection_keyboard, user_dashboard_keyboard
+
+
+def _private_admin_contact_text(application_id: int, application) -> str:
+    user_id = int(application["user_id"])
+    username = application["username"]
+    full_name = application["full_name"]
+    return (
+        f"✅ <b>Заявка #{application_id} принята</b>\n\n"
+        "📌 Кандидат готов к дальнейшей связи.\n\n"
+        f"👤 <b>{html.escape(full_name)}</b>\n"
+        + (
+            f"💬 @{html.escape(username)}\n"
+            if username
+            else "💬 Username отсутствует\n"
+        )
+        + f"🆔 ID: <code>{user_id}</code>"
+    )
+
+
+async def _send_contact_to_accepting_admin(
+    bot,
+    admin_id: int,
+    application_id: int,
+    application,
+) -> bool:
+    try:
+        await bot.send_message(
+            admin_id,
+            _private_admin_contact_text(application_id, application),
+            reply_markup=contact_keyboard(
+                int(application["user_id"]),
+                application["username"],
+            ),
+        )
+        return True
+    except TelegramForbiddenError:
+        config.logger.warning(
+            "admin %s has not opened private chat; application #%s",
+            admin_id,
+            application_id,
+        )
+        return False
+    except Exception as exc:
+        await report_runtime_exception(
+            bot,
+            exc,
+            context=f"send_admin_contact:{application_id}",
+        )
+        return False
+
 
 async def _finalize_decision_ui(
     callback: CallbackQuery,
@@ -103,8 +156,6 @@ async def accept_application(callback: CallbackQuery):
     await callback.answer("✅ Кандидат принят")
 
     user_id = int(application["user_id"])
-    username = application["username"]
-    full_name = application["full_name"]
 
     await _finalize_decision_ui(callback, application, application_id)
 
@@ -128,43 +179,19 @@ async def accept_application(callback: CallbackQuery):
             context=f"publish_accepted_decision:{application_id}",
         )
 
-    # Теперь, после принятия, данные получает только админ,
-    # который нажал кнопку «Принять».
-    private_admin_text = (
-        f"✅ <b>Заявка #{application_id} принята</b>\n\n"
-        "📌 Кандидат готов к дальнейшей связи.\n\n"
-        f"👤 <b>{html.escape(full_name)}</b>\n"
-        + (
-            f"💬 @{html.escape(username)}\n"
-            if username
-            else "💬 Username отсутствует\n"
-        )
-        + f"🆔 ID: <code>{user_id}</code>"
+    # После принятия данные получает только админ, который нажал «Принять».
+    contact_sent = await _send_contact_to_accepting_admin(
+        callback.bot,
+        callback.from_user.id,
+        application_id,
+        application,
     )
-
-    try:
-        await callback.bot.send_message(
-            callback.from_user.id,
-            private_admin_text,
-            reply_markup=contact_keyboard(user_id, username),
+    if not contact_sent and callback.message:
+        await callback.message.answer(
+            "⚠️ Не удалось отправить контакт в личные сообщения. "
+            "Открой личный чат с ботом, нажми /start и затем используй "
+            f"<code>/contact {application_id}</code>."
         )
-    except TelegramForbiddenError:
-        config.logger.warning("admin %s has not opened private chat; application #%s", callback.from_user.id, application_id)
-        if callback.message:
-            await callback.message.answer(
-                "⚠️ Не удалось отправить данные в личные сообщения. "
-                "Открой личный чат с ботом и нажми /start."
-            )
-    except Exception as exc:
-        await report_runtime_exception(
-            callback.bot,
-            exc,
-            context=f"send_admin_contact:{application_id}",
-        )
-        if callback.message:
-            await callback.message.answer(
-                "⚠️ Не удалось отправить данные администратору в личные сообщения."
-            )
 
     try:
         await callback.bot.send_message(
@@ -290,3 +317,48 @@ async def reject_reason(callback: CallbackQuery):
             exc,
             context=f"notify_user_rejected:{application_id}",
         )
+
+
+@router.message(Command("contact"))
+async def cmd_contact(message: Message):
+    """Повторно выдаёт контакт только администратору, который принял заявку."""
+    if not admin_allowed(message.from_user.id):
+        return
+
+    if message.chat.type != ChatType.PRIVATE:
+        await message.answer(
+            "🔐 Команда <code>/contact</code> доступна только в личном чате с ботом."
+        )
+        return
+
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) != 2:
+        await message.answer("Использование: <code>/contact 42</code>")
+        return
+
+    try:
+        application_id = int(parts[1].strip())
+    except ValueError:
+        await message.answer("❌ Укажи корректный номер заявки.")
+        return
+
+    application = await get_application(application_id)
+    if application is None:
+        await message.answer("❌ Заявка не найдена.")
+        return
+    if application["status"] != "accepted":
+        await message.answer("❌ Контакт доступен только после принятия заявки.")
+        return
+    if int(application["decided_by"] or 0) != message.from_user.id:
+        await message.answer(
+            "🔐 Контакт этой заявки доступен только администратору, который её принял."
+        )
+        return
+
+    await message.answer(
+        _private_admin_contact_text(application_id, application),
+        reply_markup=contact_keyboard(
+            int(application["user_id"]),
+            application["username"],
+        ),
+    )
