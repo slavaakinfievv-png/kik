@@ -135,7 +135,7 @@ def text_question_keyboard(step: int, session_id: str):
         rows.append(
             InlineKeyboardButton(
                 text="⬅️ Назад",
-                callback_data=_form_callback("back", session_id),
+                callback_data=_form_callback("back", session_id, step),
             )
         )
     rows.append(
@@ -162,7 +162,7 @@ def choice_keyboard(step: int, options: list[str], session_id: str):
         nav.append(
             InlineKeyboardButton(
                 text="⬅️ Назад",
-                callback_data=_form_callback("back", session_id),
+                callback_data=_form_callback("back", session_id, step),
             )
         )
     nav.append(
@@ -181,7 +181,7 @@ def yes_no_keyboard(step: int, session_id: str):
         nav.append(
             InlineKeyboardButton(
                 text="⬅️ Назад",
-                callback_data=_form_callback("back", session_id),
+                callback_data=_form_callback("back", session_id, step),
             )
         )
     nav.append(
@@ -219,7 +219,7 @@ def free_text_choice_keyboard(step: int, session_id: str):
         nav.append(
             InlineKeyboardButton(
                 text="⬅️ Назад",
-                callback_data=_form_callback("back", session_id),
+                callback_data=_form_callback("back", session_id, step),
             )
         )
     nav.append(
@@ -452,7 +452,7 @@ async def show_step(message: Message, state: FSMContext, step: int, edit: bool =
             nav.append(
                 InlineKeyboardButton(
                     text="⬅️ Назад",
-                    callback_data=_form_callback("back", session_id),
+                    callback_data=_form_callback("back", session_id, step),
                 )
             )
         nav.append(

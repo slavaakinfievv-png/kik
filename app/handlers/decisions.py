@@ -159,12 +159,33 @@ async def accept_application(callback: CallbackQuery):
 
     await _finalize_decision_ui(callback, application, application_id)
 
-    # Решение всегда публикуем именно в STAFF. Ошибка отправки не откатывает уже принятое решение.
+    # Сначала пытаемся выдать контакт принявшему администратору, чтобы STAFF
+    # показывал фактический результат доставки, а не обещание до сетевого вызова.
+    contact_sent = await _send_contact_to_accepting_admin(
+        callback.bot,
+        callback.from_user.id,
+        application_id,
+        application,
+    )
+    if not contact_sent and callback.message:
+        await callback.message.answer(
+            "⚠️ Не удалось отправить контакт в личные сообщения. "
+            "Открой личный чат с ботом, нажми /start и затем используй "
+            f"<code>/contact {application_id}</code>."
+        )
+
+    # Решение публикуем в STAFF уже с фактическим состоянием доставки контакта.
+    if contact_sent:
+        contact_status = "🔐 Контактные данные отправлены администратору в личные сообщения."
+    else:
+        contact_status = (
+            "⚠️ Контакт не доставлен в личные сообщения. "
+            f"Принявшему администратору нужно использовать /contact {application_id}."
+        )
     try:
         decision_message = await callback.bot.send_message(
             config.ADMIN_CHAT_ID,
-            f"✅ <b>Заявка #{application_id} принята.</b>\n"
-            "🔐 Контактные данные отправлены администратору в личные сообщения."
+            f"✅ <b>Заявка #{application_id} принята.</b>\n{contact_status}",
         )
         async with aiosqlite.connect(config.DB_PATH) as db:
             await db.execute(
@@ -177,20 +198,6 @@ async def accept_application(callback: CallbackQuery):
             callback.bot,
             exc,
             context=f"publish_accepted_decision:{application_id}",
-        )
-
-    # После принятия данные получает только админ, который нажал «Принять».
-    contact_sent = await _send_contact_to_accepting_admin(
-        callback.bot,
-        callback.from_user.id,
-        application_id,
-        application,
-    )
-    if not contact_sent and callback.message:
-        await callback.message.answer(
-            "⚠️ Не удалось отправить контакт в личные сообщения. "
-            "Открой личный чат с ботом, нажми /start и затем используй "
-            f"<code>/contact {application_id}</code>."
         )
 
     try:

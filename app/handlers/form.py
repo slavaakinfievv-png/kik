@@ -75,18 +75,30 @@ async def cancel_form(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.startswith("form:back:"))
 async def form_back(callback: CallbackQuery, state: FSMContext):
-    parts = (callback.data or "").split(":", 2)
-    if len(parts) != 3:
-        await callback.answer("Некорректная кнопка.", show_alert=True)
+    parts = (callback.data or "").split(":", 3)
+    if len(parts) != 4:
+        # Старые кнопки без номера шага безопасно считаем неактуальными.
+        await callback.answer("Эта кнопка уже неактуальна.", show_alert=True)
         return
     if not _state_matches(await state.get_state(), ApplicationForm.filling):
         await callback.answer("Сейчас возврат недоступен.", show_alert=True)
         return
     if not await _validate_form_session(callback, state, parts[2]):
         return
+    try:
+        button_step = int(parts[3])
+    except ValueError:
+        await callback.answer("Некорректный шаг.", show_alert=True)
+        return
 
     data = await state.get_data()
     step = int(data.get("step", 0))
+    if button_step != step:
+        await callback.answer(
+            "Эта кнопка относится к предыдущему вопросу. Используй текущую анкету.",
+            show_alert=True,
+        )
+        return
     editing_step = data.get("editing_step")
 
     if editing_step is not None:

@@ -2,6 +2,7 @@ import os
 import tempfile
 import unittest
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 import aiosqlite
 from aiogram.enums import ChatType
@@ -394,6 +395,67 @@ class BotEndToEndTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(after["step"], 3)
         self.assertEqual(after["answers"]["level"], "100")
         self.assertTrue(any(item["show_alert"] for item in stale.answers))
+
+    async def test_stale_back_button_cannot_rewind_current_step(self):
+        state, message, session_id = await self._start_form()
+        await form_handlers.form_text_answer(
+            FakeMessage(self.user, self.bot, text="Игрок"), state
+        )
+        await form_handlers.form_text_answer(
+            FakeMessage(self.user, self.bot, text="RobloxPlayer"), state
+        )
+
+        choose_level = FakeCallback(
+            f"form:choose:{session_id}:2:3", self.user, message, self.bot
+        )
+        await form_handlers.form_choose(choose_level, state)
+        self.assertEqual((await state.get_data())["step"], 3)
+
+        stale_back = FakeCallback(
+            f"form:back:{session_id}:2", self.user, message, self.bot
+        )
+        await form_handlers.form_back(stale_back, state)
+        self.assertEqual((await state.get_data())["step"], 3)
+        self.assertTrue(any(item["show_alert"] for item in stale_back.answers))
+
+        current_back = FakeCallback(
+            f"form:back:{session_id}:3", self.user, message, self.bot
+        )
+        await form_handlers.form_back(current_back, state)
+        self.assertEqual((await state.get_data())["step"], 2)
+
+    async def test_staff_reports_contact_delivery_failure_truthfully(self):
+        application_id, staff_message_id, _ = await self._complete_and_submit()
+        staff_message = FakeMessage(
+            self.admin,
+            self.bot,
+            chat_id=config.ADMIN_CHAT_ID,
+            chat_type=ChatType.SUPERGROUP,
+            message_id=staff_message_id,
+        )
+        accept = FakeCallback(
+            f"decision:accept:{application_id}",
+            self.admin,
+            staff_message,
+            self.bot,
+        )
+
+        with patch.object(
+            decision_handlers,
+            "_send_contact_to_accepting_admin",
+            new=AsyncMock(return_value=False),
+        ):
+            await decision_handlers.accept_application(accept)
+
+        staff_decisions = [
+            item
+            for item in self.bot.sent
+            if item["chat_id"] == config.ADMIN_CHAT_ID
+            and f"Заявка #{application_id} принята" in item["text"]
+        ]
+        self.assertEqual(len(staff_decisions), 1)
+        self.assertIn("Контакт не доставлен", staff_decisions[0]["text"])
+        self.assertIn(f"/contact {application_id}", staff_decisions[0]["text"])
 
     async def test_restart_makes_old_form_buttons_safely_inactive(self):
         state, message, session_id = await self._start_form()
