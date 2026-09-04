@@ -7,6 +7,13 @@ on:
     paths:
       - audit/bot-error-monitoring.patch
       - .github/workflows/apply-audit-patch.yml
+  pull_request:
+    branches:
+      - main
+    paths:
+      - audit/bot-error-monitoring.patch
+      - .github/workflows/apply-audit-patch.yml
+      - bot.py
 
 permissions:
   contents: write
@@ -15,9 +22,10 @@ jobs:
   apply:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout audit branch
         uses: actions/checkout@v4
         with:
+          ref: audit/error-monitoring
           fetch-depth: 0
 
       - name: Apply audited changes
