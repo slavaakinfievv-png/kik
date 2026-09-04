@@ -2,6 +2,7 @@ import asyncio
 import os
 import tempfile
 import unittest
+from types import SimpleNamespace
 
 import aiosqlite
 
@@ -13,6 +14,7 @@ os.environ.setdefault("ERROR_WEBHOOK_URL", "")
 
 import bot
 from app import config
+from app.handlers import form as form_handlers
 
 
 class BotLogicTests(unittest.IsolatedAsyncioTestCase):
@@ -52,6 +54,33 @@ class BotLogicTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertNotIn("form:back:cafebabe", callbacks)
         self.assertIn("form:cancel:cafebabe", callbacks)
+
+    def test_form_text_handler_does_not_consume_commands(self):
+        self.assertFalse(form_handlers._is_form_input_message(SimpleNamespace(text="/cancel")))
+        self.assertFalse(form_handlers._is_form_input_message(SimpleNamespace(text="/start")))
+        self.assertFalse(form_handlers._is_form_input_message(SimpleNamespace(text="/status")))
+        self.assertTrue(form_handlers._is_form_input_message(SimpleNamespace(text="обычный ответ")))
+        self.assertTrue(form_handlers._is_form_input_message(SimpleNamespace(text=None)))
+
+    def test_choice_index_must_be_inside_options(self):
+        question = {"options": ["первый", "второй"]}
+        self.assertEqual(form_handlers._choice_option(question, "0"), "первый")
+        self.assertEqual(form_handlers._choice_option(question, "1"), "второй")
+        self.assertIsNone(form_handlers._choice_option(question, "-1"))
+        self.assertIsNone(form_handlers._choice_option(question, "2"))
+        self.assertIsNone(form_handlers._choice_option(question, "invalid"))
+
+    async def test_staff_message_link_detects_deleted_application(self):
+        application_id = await self._insert_pending()
+        linked = await form_handlers._link_staff_message(application_id, 555)
+        self.assertTrue(linked)
+
+        async with aiosqlite.connect(config.DB_PATH) as db:
+            await db.execute("DELETE FROM applications WHERE id = ?", (application_id,))
+            await db.commit()
+
+        linked_after_delete = await form_handlers._link_staff_message(application_id, 777)
+        self.assertFalse(linked_after_delete)
 
     async def test_application_ids_are_not_reused_after_delete(self):
         application_id = await self._insert_pending()
