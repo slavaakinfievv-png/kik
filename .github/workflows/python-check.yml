@@ -51,3 +51,12 @@ jobs:
           assert payload["exception_type"] == "RuntimeError"
           print("bot import and diagnostic helpers: OK")
           PY
+
+      - name: Run logic tests
+        env:
+          BOT_TOKEN: test-token-not-used-during-tests
+          ADMIN_CHAT_ID: "-1001234567890"
+          ADMIN_IDS: "123456789"
+          LOG_FILE: ""
+          ERROR_WEBHOOK_URL: ""
+        run: python -m unittest -v tests.test_logic
