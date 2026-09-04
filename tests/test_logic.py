@@ -14,6 +14,7 @@ os.environ.setdefault("ERROR_WEBHOOK_URL", "")
 
 import bot
 from app import config
+from app.handlers import decisions as decision_handlers
 from app.handlers import form as form_handlers
 
 
@@ -69,6 +70,18 @@ class BotLogicTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(form_handlers._choice_option(question, "-1"))
         self.assertIsNone(form_handlers._choice_option(question, "2"))
         self.assertIsNone(form_handlers._choice_option(question, "invalid"))
+
+    def test_private_admin_contact_is_escaped(self):
+        application = {
+            "user_id": 42,
+            "username": "safe_user",
+            "full_name": "<Admin & Candidate>",
+        }
+        text = decision_handlers._private_admin_contact_text(7, application)
+        self.assertIn("Заявка #7", text)
+        self.assertIn("&lt;Admin &amp; Candidate&gt;", text)
+        self.assertIn("@safe_user", text)
+        self.assertIn("<code>42</code>", text)
 
     async def test_staff_message_link_detects_deleted_application(self):
         application_id = await self._insert_pending()
