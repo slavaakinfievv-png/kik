@@ -1,21 +1,27 @@
 import asyncio
+import hashlib
 import html
 import json
 import logging
 import os
+import traceback
+import urllib.request
 from datetime import datetime, timezone
+from logging.handlers import RotatingFileHandler
+from time import monotonic
 
 import aiosqlite
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.exceptions import TelegramForbiddenError
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     CallbackQuery,
+    ErrorEvent,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
@@ -30,11 +36,26 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+LOG_FORMAT = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    format=LOG_FORMAT,
 )
 logger = logging.getLogger(__name__)
+
+LOG_FILE = os.getenv("LOG_FILE", "bot.log").strip()
+if LOG_FILE:
+    try:
+        file_handler = RotatingFileHandler(
+            LOG_FILE,
+            maxBytes=5 * 1024 * 1024,
+            backupCount=3,
+            encoding="utf-8",
+        )
+        file_handler.setFormatter(logging.Formatter(LOG_FORMAT))
+        logging.getLogger().addHandler(file_handler)
+    except OSError:
+        logger.warning("Не удалось открыть файл логов %s", LOG_FILE, exc_info=True)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 
@@ -56,6 +77,17 @@ DB_PATH = os.getenv(
     "applications.db"
 ).strip()
 
+ERROR_WEBHOOK_URL = os.getenv("ERROR_WEBHOOK_URL", "").strip()
+try:
+    ERROR_NOTIFY_COOLDOWN_SECONDS = int(
+        os.getenv("ERROR_NOTIFY_COOLDOWN_SECONDS", "300")
+    )
+except ValueError:
+    ERROR_NOTIFY_COOLDOWN_SECONDS = 300
+    logger.warning(
+        "Некорректный ERROR_NOTIFY_COOLDOWN_SECONDS; используется 300 секунд"
+    )
+
 
 if not BOT_TOKEN:
     raise RuntimeError(
@@ -76,6 +108,153 @@ if not ADMIN_IDS:
 
 
 router = Router()
+
+
+# =========================================================
+# ДИАГНОСТИКА И ОШИБКИ
+# =========================================================
+
+_error_last_notified: dict[str, float] = {}
+
+
+def _error_update_context(event: ErrorEvent | None) -> dict[str, int | str | None]:
+    context: dict[str, int | str | None] = {
+        "update_id": None,
+        "update_type": "internal",
+        "user_id": None,
+        "chat_id": None,
+    }
+    if event is None:
+        return context
+
+    update = event.update
+    context["update_id"] = getattr(update, "update_id", None)
+
+    callback = getattr(update, "callback_query", None)
+    message = getattr(update, "message", None) or getattr(update, "edited_message", None)
+    if callback is not None:
+        context["update_type"] = "callback_query"
+        context["user_id"] = getattr(getattr(callback, "from_user", None), "id", None)
+        callback_message = getattr(callback, "message", None)
+        context["chat_id"] = getattr(getattr(callback_message, "chat", None), "id", None)
+    elif message is not None:
+        context["update_type"] = "message"
+        context["user_id"] = getattr(getattr(message, "from_user", None), "id", None)
+        context["chat_id"] = getattr(getattr(message, "chat", None), "id", None)
+
+    return context
+
+
+def _build_error_payload(
+    exception: Exception,
+    context: str,
+    event: ErrorEvent | None = None,
+) -> tuple[str, dict[str, object]]:
+    tb_text = "".join(
+        traceback.format_exception(
+            type(exception),
+            exception,
+            exception.__traceback__,
+        )
+    )
+    fingerprint_source = f"{type(exception).__name__}|{context}|{tb_text}"
+    error_id = hashlib.sha256(fingerprint_source.encode("utf-8")).hexdigest()[:12]
+    update_context = _error_update_context(event)
+    payload: dict[str, object] = {
+        "error_id": error_id,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "context": context,
+        "exception_type": type(exception).__name__,
+        "exception": str(exception)[:1500],
+        "traceback": tb_text[-12000:],
+        **update_context,
+    }
+    return error_id, payload
+
+
+def _post_error_webhook(payload: dict[str, object]) -> None:
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    request = urllib.request.Request(
+        ERROR_WEBHOOK_URL,
+        data=data,
+        headers={"Content-Type": "application/json; charset=utf-8"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=10) as response:
+        status = getattr(response, "status", 200)
+        if status >= 400:
+            raise RuntimeError(f"error webhook returned HTTP {status}")
+
+
+async def _send_error_webhook(payload: dict[str, object]) -> None:
+    if not ERROR_WEBHOOK_URL:
+        return
+    if not ERROR_WEBHOOK_URL.startswith("https://"):
+        logger.warning("ERROR_WEBHOOK_URL пропущен: разрешён только https://")
+        return
+    try:
+        await asyncio.to_thread(_post_error_webhook, payload)
+    except Exception:
+        logger.warning("Не удалось отправить диагностику в ERROR_WEBHOOK_URL", exc_info=True)
+
+
+async def report_runtime_exception(
+    bot: Bot,
+    exception: Exception,
+    *,
+    context: str,
+    event: ErrorEvent | None = None,
+) -> str:
+    error_id, payload = _build_error_payload(exception, context, event)
+    logger.error(
+        "runtime error id=%s context=%s",
+        error_id,
+        context,
+        exc_info=(type(exception), exception, exception.__traceback__),
+    )
+
+    now = monotonic()
+    previous = _error_last_notified.get(error_id, 0.0)
+    if now - previous < max(0, ERROR_NOTIFY_COOLDOWN_SECONDS):
+        return error_id
+    _error_last_notified[error_id] = now
+
+    await _send_error_webhook(payload)
+
+    short_error = html.escape(str(exception)[:700] or type(exception).__name__)
+    admin_text = (
+        "🚨 <b>ОШИБКА БОТА</b>\n\n"
+        f"ID: <code>{error_id}</code>\n"
+        f"Контекст: <code>{html.escape(context)}</code>\n"
+        f"Тип: <code>{html.escape(type(exception).__name__)}</code>\n"
+        f"Ошибка: {short_error}\n\n"
+        "Полный traceback записан в лог"
+        + (" и отправлен во внешний webhook." if ERROR_WEBHOOK_URL else ".")
+    )
+    for admin_id in ADMIN_IDS:
+        try:
+            await bot.send_message(admin_id, admin_text)
+        except TelegramForbiddenError:
+            logger.warning("Не удалось уведомить админа %s: личный чат с ботом закрыт", admin_id)
+        except Exception:
+            logger.warning("Не удалось уведомить админа %s об ошибке %s", admin_id, error_id, exc_info=True)
+
+    return error_id
+
+
+@router.error()
+async def global_error_handler(event: ErrorEvent, bot: Bot):
+    exception = event.exception
+    if isinstance(exception, TelegramBadRequest) and "message is not modified" in str(exception).lower():
+        logger.debug("Telegram message is not modified", exc_info=(type(exception), exception, exception.__traceback__))
+        return
+
+    await report_runtime_exception(
+        bot,
+        exception,
+        context="unhandled_update",
+        event=event,
+    )
 
 
 # =========================================================
@@ -931,16 +1110,19 @@ async def make_decision(
 
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
+        await db.execute("BEGIN IMMEDIATE")
         cursor = await db.execute(
             "SELECT status FROM applications WHERE id = ?",
             (application_id,),
         )
         current = await cursor.fetchone()
         if not current:
+            await db.rollback()
             return False
 
         old_status = current["status"]
         if old_status != "pending":
+            await db.rollback()
             return False
 
         cursor = await db.execute(
@@ -1156,39 +1338,59 @@ async def cmd_clearstaff(message: Message):
 
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
-            "SELECT staff_message_id, decision_message_id FROM applications"
+            "SELECT id, staff_message_id, decision_message_id FROM applications"
         )
         rows = await cursor.fetchall()
 
     deleted = 0
-    seen = set()
-    for staff_message_id, decision_message_id in rows:
-        for message_id in (staff_message_id, decision_message_id):
-            if not message_id or int(message_id) in seen:
-                continue
-            seen.add(int(message_id))
-            try:
-                await message.bot.delete_message(ADMIN_CHAT_ID, int(message_id))
-                deleted += 1
-            except Exception:
-                pass
+    failed = 0
+    delete_results: dict[int, bool] = {}
 
-    # Удалённые Telegram-сообщения больше не должны числиться привязанными в БД.
+    async def delete_once(message_id: int) -> bool:
+        nonlocal deleted, failed
+        if message_id in delete_results:
+            return delete_results[message_id]
+        try:
+            await message.bot.delete_message(ADMIN_CHAT_ID, message_id)
+            deleted += 1
+            result = True
+        except TelegramBadRequest as exc:
+            if "message to delete not found" in str(exc).lower():
+                result = True
+            else:
+                failed += 1
+                logger.warning("failed to delete STAFF message %s", message_id, exc_info=True)
+                result = False
+        except Exception:
+            failed += 1
+            logger.warning("failed to delete STAFF message %s", message_id, exc_info=True)
+            result = False
+        delete_results[message_id] = result
+        return result
+
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "UPDATE applications SET staff_message_id = NULL, decision_message_id = NULL"
-        )
+        for application_id, staff_message_id, decision_message_id in rows:
+            if staff_message_id and await delete_once(int(staff_message_id)):
+                await db.execute(
+                    "UPDATE applications SET staff_message_id = NULL WHERE id = ?",
+                    (application_id,),
+                )
+            if decision_message_id and await delete_once(int(decision_message_id)):
+                await db.execute(
+                    "UPDATE applications SET decision_message_id = NULL WHERE id = ?",
+                    (application_id,),
+                )
         await db.commit()
 
-    # Удаляем также саму команду /clearstaff из группы.
     try:
         await message.delete()
     except Exception:
-        pass
+        logger.debug("failed to delete /clearstaff command message", exc_info=True)
 
     await message.answer(
         f"🧹 Удалено сообщений бота из STAFF: <b>{deleted}</b>\n"
-        "Заявки и счётчик базы не изменены."
+        f"⚠️ Не удалось удалить: <b>{failed}</b>\n"
+        "Заявки и счётчик базы не изменены. Неудалённые ID сохранены для повторной попытки."
     )
 
 
@@ -2564,14 +2766,12 @@ async def submit_application(callback: CallbackQuery, state: FSMContext):
             admin_text,
             reply_markup=admin_keyboard(application_id),
         )
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute(
-                "UPDATE applications SET staff_message_id = ? WHERE id = ?",
-                (staff_message.message_id, application_id),
-            )
-            await db.commit()
-    except Exception:
-        logger.exception("failed to send application #%s to STAFF", application_id)
+    except Exception as exc:
+        await report_runtime_exception(
+            callback.bot,
+            exc,
+            context=f"send_application_to_staff:{application_id}",
+        )
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("DELETE FROM applications WHERE id = ?", (application_id,))
             await db.commit()
@@ -2580,6 +2780,20 @@ async def submit_application(callback: CallbackQuery, state: FSMContext):
             show_alert=True,
         )
         return
+
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "UPDATE applications SET staff_message_id = ? WHERE id = ?",
+                (staff_message.message_id, application_id),
+            )
+            await db.commit()
+    except Exception as exc:
+        await report_runtime_exception(
+            callback.bot,
+            exc,
+            context=f"save_staff_message_id:{application_id}",
+        )
 
     await state.clear()
     await callback.answer("✅ Анкета отправлена!")
@@ -2644,7 +2858,7 @@ async def accept_application(callback: CallbackQuery):
         try:
             await callback.message.edit_reply_markup(reply_markup=None)
         except Exception:
-            pass
+            logger.debug("failed to remove decision keyboard for application #%s", application_id, exc_info=True)
     await disable_staff_application_keyboard(callback.bot, application)
 
     # Решение всегда публикуем именно в STAFF. Ошибка отправки не откатывает уже принятое решение.
@@ -2660,8 +2874,12 @@ async def accept_application(callback: CallbackQuery):
                 (decision_message.message_id, application_id),
             )
             await db.commit()
-    except Exception:
-        logger.exception("failed to publish accepted decision for application #%s", application_id)
+    except Exception as exc:
+        await report_runtime_exception(
+            callback.bot,
+            exc,
+            context=f"publish_accepted_decision:{application_id}",
+        )
 
     # Теперь, после принятия, данные получает только админ,
     # который нажал кнопку «Принять».
@@ -2690,8 +2908,12 @@ async def accept_application(callback: CallbackQuery):
                 "⚠️ Не удалось отправить данные в личные сообщения. "
                 "Открой личный чат с ботом и нажми /start."
             )
-    except Exception:
-        logger.exception("failed to send admin contact for application #%s", application_id)
+    except Exception as exc:
+        await report_runtime_exception(
+            callback.bot,
+            exc,
+            context=f"send_admin_contact:{application_id}",
+        )
         if callback.message:
             await callback.message.answer(
                 "⚠️ Не удалось отправить данные администратору в личные сообщения."
@@ -2706,8 +2928,12 @@ async def accept_application(callback: CallbackQuery):
             "Теперь тебе доступны просмотр статуса и история заявок.",
             reply_markup=user_dashboard_keyboard("accepted"),
         )
-    except Exception:
-        logger.exception("failed to notify user %s about accepted application #%s", user_id, application_id)
+    except Exception as exc:
+        await report_runtime_exception(
+            callback.bot,
+            exc,
+            context=f"notify_user_accepted:{application_id}",
+        )
 
 
 # =========================================================
@@ -2788,7 +3014,7 @@ async def reject_reason(callback: CallbackQuery):
         try:
             await callback.message.edit_reply_markup(reply_markup=None)
         except Exception:
-            pass
+            logger.debug("failed to remove decision keyboard for application #%s", application_id, exc_info=True)
     await disable_staff_application_keyboard(callback.bot, application)
 
     try:
@@ -2803,8 +3029,12 @@ async def reject_reason(callback: CallbackQuery):
                 (decision_message.message_id, application_id),
             )
             await db.commit()
-    except Exception:
-        logger.exception("failed to publish rejected decision for application #%s", application_id)
+    except Exception as exc:
+        await report_runtime_exception(
+            callback.bot,
+            exc,
+            context=f"publish_rejected_decision:{application_id}",
+        )
 
     try:
         await callback.bot.send_message(
@@ -2814,8 +3044,12 @@ async def reject_reason(callback: CallbackQuery):
             "Ты можешь посмотреть статус заявки и подать новую анкету.",
             reply_markup=user_dashboard_keyboard("rejected"),
         )
-    except Exception:
-        logger.exception("failed to notify user %s about rejected application #%s", int(application["user_id"]), application_id)
+    except Exception as exc:
+        await report_runtime_exception(
+            callback.bot,
+            exc,
+            context=f"notify_user_rejected:{application_id}",
+        )
 
 
 # =========================================================
@@ -2823,10 +3057,6 @@ async def reject_reason(callback: CallbackQuery):
 # =========================================================
 
 async def main():
-
-    # Создаём базу при необходимости
-    await init_db()
-
 
     bot = Bot(
 
@@ -2837,18 +3067,35 @@ async def main():
         )
     )
 
+    try:
+        await init_db()
+    except Exception as exc:
+        await report_runtime_exception(
+            bot,
+            exc,
+            context="startup:init_db",
+        )
+        raise
 
     dp = Dispatcher()
 
     dp.include_router(router)
 
-
-    print(
-        "Evade Clan Bot запущен"
+    logger.info(
+        "Evade Clan Bot запущен | db=%s | error_webhook=%s",
+        DB_PATH,
+        "enabled" if ERROR_WEBHOOK_URL else "disabled",
     )
 
-
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot)
+    except Exception as exc:
+        await report_runtime_exception(
+            bot,
+            exc,
+            context="polling:fatal",
+        )
+        raise
 
 
 if __name__ == "__main__":
