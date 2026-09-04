@@ -437,6 +437,17 @@ async def submit_application(callback: CallbackQuery, state: FSMContext):
         application_id = int(cursor.lastrowid)
         await db.commit()
 
+    # После короткой DB-операции сразу закрываем callback spinner. Дальше идёт
+    # сетевой вызов Telegram, который не должен удерживать callback без ответа.
+    try:
+        await callback.answer("⏳ Отправляю анкету…")
+    except Exception:
+        config.logger.debug(
+            "failed to answer submit callback for application #%s",
+            application_id,
+            exc_info=True,
+        )
+
     config.logger.info("application #%s created by user %s", application_id, user_id)
     admin_text = build_staff_card(application_id, answers)
 
@@ -455,10 +466,11 @@ async def submit_application(callback: CallbackQuery, state: FSMContext):
         async with aiosqlite.connect(config.DB_PATH) as db:
             await db.execute("DELETE FROM applications WHERE id = ?", (application_id,))
             await db.commit()
-        await callback.answer(
-            "Не удалось отправить заявку администрации. Попробуй отправить ещё раз.",
-            show_alert=True,
-        )
+        if callback.message:
+            await callback.message.answer(
+                "⚠️ Не удалось отправить заявку администрации. "
+                "Нажми «✅ Отправить» ещё раз."
+            )
         return
 
     try:
@@ -485,14 +497,14 @@ async def submit_application(callback: CallbackQuery, state: FSMContext):
                 application_id,
                 exc_info=True,
             )
-        await callback.answer(
-            "Заявка была удалена до завершения отправки. Нажми «Отправить» ещё раз.",
-            show_alert=True,
-        )
+        if callback.message:
+            await callback.message.answer(
+                "⚠️ Заявка была удалена до завершения отправки. "
+                "Нажми «✅ Отправить» ещё раз."
+            )
         return
 
     await state.clear()
-    await callback.answer("✅ Анкета отправлена!")
     if callback.message:
         await callback.message.edit_text(
             f"✅ <b>Анкета #{application_id} отправлена!</b>\n\n"
