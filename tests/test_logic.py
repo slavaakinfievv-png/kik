@@ -12,12 +12,13 @@ os.environ.setdefault("LOG_FILE", "")
 os.environ.setdefault("ERROR_WEBHOOK_URL", "")
 
 import bot
+from app import config
 
 
 class BotLogicTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.tmpdir = tempfile.TemporaryDirectory()
-        bot.DB_PATH = os.path.join(self.tmpdir.name, "applications.db")
+        config.DB_PATH = os.path.join(self.tmpdir.name, "applications.db")
         await bot.init_db()
 
     async def asyncTearDown(self):
@@ -25,7 +26,7 @@ class BotLogicTests(unittest.IsolatedAsyncioTestCase):
 
     async def _insert_pending(self, user_id=1):
         now = "2026-09-04T10:00:00+00:00"
-        async with aiosqlite.connect(bot.DB_PATH) as db:
+        async with aiosqlite.connect(config.DB_PATH) as db:
             cursor = await db.execute(
                 """
                 INSERT INTO applications (
@@ -56,7 +57,7 @@ class BotLogicTests(unittest.IsolatedAsyncioTestCase):
         application_id = await self._insert_pending()
         self.assertEqual(application_id, 1)
 
-        async with aiosqlite.connect(bot.DB_PATH) as db:
+        async with aiosqlite.connect(config.DB_PATH) as db:
             await db.execute("DELETE FROM applications WHERE id = ?", (application_id,))
             await db.commit()
 
@@ -82,7 +83,7 @@ class BotLogicTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(sum(bool(result) for result in results), 1)
 
-        async with aiosqlite.connect(bot.DB_PATH) as db:
+        async with aiosqlite.connect(config.DB_PATH) as db:
             cursor = await db.execute(
                 "SELECT status FROM applications WHERE id = ?",
                 (application_id,),
@@ -98,7 +99,7 @@ class BotLogicTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_legacy_pending_updated_at_is_cleaned(self):
         now = "2026-09-04T10:00:00+00:00"
-        async with aiosqlite.connect(bot.DB_PATH) as db:
+        async with aiosqlite.connect(config.DB_PATH) as db:
             await db.execute(
                 """
                 INSERT INTO applications (
@@ -111,7 +112,7 @@ class BotLogicTests(unittest.IsolatedAsyncioTestCase):
             await db.commit()
 
         await bot.init_db()
-        async with aiosqlite.connect(bot.DB_PATH) as db:
+        async with aiosqlite.connect(config.DB_PATH) as db:
             cursor = await db.execute("SELECT updated_at FROM applications WHERE id = 1")
             self.assertIsNone((await cursor.fetchone())[0])
 
