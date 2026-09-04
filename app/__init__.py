@@ -1,0 +1,1 @@
+"""Evade Clan bot package."""
